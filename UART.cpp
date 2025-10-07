@@ -203,6 +203,28 @@ void UART::println(uint32_t value) {
     write('\n');
 }
 
+// 新增：uint16_t 支持
+void UART::print(uint16_t value) {
+    print((uint32_t)value);
+}
+
+void UART::println(uint16_t value) {
+    print(value);
+    write('\r');
+    write('\n');
+}
+
+// 新增：uint8_t 支持
+void UART::print(uint8_t value) {
+    print((uint32_t)value);
+}
+
+void UART::println(uint8_t value) {
+    print(value);
+    write('\r');
+    write('\n');
+}
+
 void UART::printHex(uint8_t value) {
     uint8_t nibble;
     
@@ -213,6 +235,18 @@ void UART::printHex(uint8_t value) {
     // 低4位
     nibble = value & 0x0F;
     write(nibble < 10 ? '0' + nibble : 'A' + nibble - 10);
+}
+
+// 新增：16位十六进制支持
+void UART::printHex(uint16_t value) {
+    printHex((uint8_t)(value >> 8));
+    printHex((uint8_t)(value & 0xFF));
+}
+
+// 新增：32位十六进制支持  
+void UART::printHex(uint32_t value) {
+    printHex((uint16_t)(value >> 16));
+    printHex((uint16_t)(value & 0xFFFF));
 }
 
 int16_t UART::available() {

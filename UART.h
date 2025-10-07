@@ -12,14 +12,20 @@ public:
     void begin(uint32_t baudrate);
     void print(const char* str);
     void println(const char* str);
-    void println() { print("\r\n"); }  // 添加无参数版本
+    void println() { print("\r\n"); }
     void print(float value, uint8_t decimals = 2);
     void println(float value, uint8_t decimals = 2);
     void print(int value);
     void println(int value);
-    void print(uint32_t value);  // 添加uint32_t版本
+    void print(uint32_t value);
     void println(uint32_t value);
-    void printHex(uint8_t value);  // 添加十六进制打印
+    void print(uint16_t value);      // 添加 uint16_t 支持
+    void println(uint16_t value);    // 添加 uint16_t 支持
+    void print(uint8_t value);       // 添加 uint8_t 支持  
+    void println(uint8_t value);     // 添加 uint8_t 支持
+    void printHex(uint8_t value);
+    void printHex(uint16_t value);   // 添加 16位十六进制支持
+    void printHex(uint32_t value);   // 添加 32位十六进制支持
     
     // 检查是否有数据可读
     int16_t available();
@@ -31,6 +37,9 @@ public:
     // 为中断函数提供公共访问方法
     void rx_isr();
     void tx_isr();
+    
+    // 添加公共字符输出方法
+    void writeChar(char c) { write(c); }
     
 private:
     void write(uint8_t c);

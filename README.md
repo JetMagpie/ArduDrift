@@ -9,6 +9,8 @@ An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight
 - **Configurable Installation**: Supports 0°, 90°, 180°, and 270° flight controller rotation
 - **Real-time Adjustability**: Gain control via remote control channel
 - **Sensor Filtering**: Multiple low-pass filters for smooth signal processing
+- **Serial Command Interface**: Real-time parameter adjustment via serial connection
+- **EEPROM Storage**: All parameters automatically saved and restored
 
 ## Hardware Requirements
 
@@ -52,6 +54,73 @@ An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight
    - Mount APM2.8 in desired orientation
    - Update `BOARD_ROTATION` in code if rotated (default: 90°)
    - Connect all signals as per wiring table
+
+## Serial Command Interface
+
+The system provides a comprehensive serial command interface for real-time parameter adjustment. Connect to the APM2.8 via USB at 115200 baud.
+
+### Available Commands:
+
+| Command | Description | Example |
+|---------|-------------|---------|
+| `report on` | Enable real-time data reporting | `report on` |
+| `report off` | Disable real-time data reporting | `report off` |
+| `get <param>` | Get current parameter value | `get K_GAIN` |
+| `set <param> <value>` | Set parameter value | `set K_GAIN 0.02` |
+| `params` | List all parameters and current values | `params` |
+| `help` | Show command help | `help` |
+
+### Usage Examples:
+
+```bash
+# Enable data monitoring
+report on
+
+# Check current gain value
+get K_GAIN
+
+# Increase gain sensitivity
+set K_GAIN 0.02
+
+# List all parameters
+params
+
+# Disable data output when tuning
+report off
+```
+## Parameter Tables
+
+### System Parameters
+
+| Parameter | Default Value | Valid Range | Description |
+|-----------|---------------|-------------|-------------|
+| `BOARD_ROTATION` | 90 | 0-360° | Flight controller installation angle |
+| `K_GAIN` | 0.015 | 0.001-0.1 | Overall sensitivity multiplier |
+| `DEFAULT_GAIN` | 200 | 0-500 | Default gain when no input signal |
+
+### Control Parameters
+
+| Parameter | Default Value | Valid Range | Description |
+|-----------|---------------|-------------|-------------|
+| `STEER_BY_ACC_RATE` | 2 | 0-20 | Lateral acceleration contribution ratio |
+| `COUNTER_STEER_RANGE` | 0.85 | 0-1.0 | Maximum counter-steering output range |
+| `STEER_BY_ANGACC_RATE` | 1 | 0-10 | Angular acceleration contribution ratio |
+
+### Servo Parameters
+
+| Parameter | Default Value | Valid Range | Description |
+|-----------|---------------|-------------|-------------|
+| `SERVO_LIMIT_LEFT` | 1.0 | 0-1.0 | Left servo limit (1.0 = full range) |
+| `SERVO_LIMIT_RIGHT` | 0.9 | 0-1.0 | Right servo limit (1.0 = full range) |
+
+### Filter Parameters
+
+| Parameter | Default Value | Valid Range | Description |
+|-----------|---------------|-------------|-------------|
+| `LOOP_FREQUENCY` | 500 | 50-1000Hz | Main control loop frequency |
+| `IMU_FILTER` | 20 | 1-500Hz | IMU sensor filter cutoff frequency |
+| `SERVO_FILTER` | 20 | 1-500Hz | Servo output filter for smoothing |
+| `ANGACC_FILTER` | 10 | 1-500Hz | Angular acceleration filter |
 
 ## Control Algorithm
 
@@ -99,6 +168,7 @@ Current default parameters work well for medium-speed drifting. Ongoing optimiza
 2. **No Receiver Input**: Verify OUTPUT 6 & 7 connections and receiver binding
 3. **Erratic Behavior**: Ensure stable 5V power supply and proper grounding
 4. **Wrong Direction**: Adjust `BOARD_ROTATION` parameter in code
+5. **Serial Connection Issues**: Verify 115200 baud rate and correct COM port
 
 ## Contributing
 

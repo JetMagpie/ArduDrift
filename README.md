@@ -11,6 +11,7 @@ An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight
 - **Sensor Filtering**: Multiple low-pass filters for smooth signal processing
 - **Serial Command Interface**: Real-time parameter adjustment via serial connection
 - **EEPROM Storage**: All parameters automatically saved and restored
+- **S-Curve Response**: Configurable non-linear response curves for gyro output and servo response
 
 ## Hardware Requirements
 
@@ -105,6 +106,8 @@ report off
 | `STEER_BY_ACC_RATE` | 2 | 0-20 | Lateral acceleration contribution ratio |
 | `COUNTER_STEER_RANGE` | 0.85 | 0-1.0 | Maximum counter-steering output range |
 | `STEER_BY_ANGACC_RATE` | 1 | 0-10 | Angular acceleration contribution ratio |
+| `GYRO_EXP` | 0 | -1 to 1 | Gyro output S-curve exponent (0=linear) |
+| `OUTPUT_EXP` | 0 | -1 to 1 | Servo output S-curve exponent (0=linear) |
 
 ### Servo Parameters
 
@@ -136,7 +139,17 @@ The system uses a simplified physics-based approach:
    - Right rotation (negative angular_vel) → Left counter-steer (negative output)
    - Left rotation (positive angular_vel) → Right counter-steer (positive output)
 
-3. **Combined Output**:
+3. **S-Curve Response**:
+   - **Gyro Output S-Curve** (`GYRO_EXP`): Adjusts sensitivity distribution in counter-steering calculation
+     - Positive values: More sensitive in mid-range, less sensitive at extremes
+     - Negative values: Less sensitive in mid-range, more sensitive at extremes
+     - Formula: `y = x^(10^GYRO_EXP)` for positive inputs, `y = -|x|^(10^GYRO_EXP)` for negative inputs
+   
+   - **Servo Output S-Curve** (`OUTPUT_EXP`): Adjusts sensitivity distribution in final servo output
+     - Same exponential behavior applied to combined steering and correction signals
+     - Allows fine-tuning of steering feel and response characteristics
+
+4. **Combined Output**:
    - Both components are summed and scaled by user gain
    - Final output limited to ±1.0 for servo safety
 

@@ -19,10 +19,12 @@ struct SystemParams {
     float SERVO_FILTER;
     float ANGACC_FILTER;
     float STEER_BY_ANGACC_RATE;
+    float GYRO_EXP; 
+    float OUTPUT_EXP; 
 };
 
 // 默认参数值
-#define DEFAULT_BOARD_ROTATION 90
+#define DEFAULT_BOARD_ROTATION 270
 #define DEFAULT_K_GAIN 0.015
 #define DEFAULT_DEFAULT_GAIN 200
 #define DEFAULT_STEER_BY_ACC_RATE 2
@@ -34,6 +36,8 @@ struct SystemParams {
 #define DEFAULT_SERVO_FILTER 20
 #define DEFAULT_ANGACC_FILTER 10
 #define DEFAULT_STEER_BY_ANGACC_RATE 1
+#define DEFAULT_GYRO_EXP 0
+#define DEFAULT_OUTPUT_EXP 0
 
 // EEPROM管理器
 EEPROM_Manager eeprom(0);
@@ -87,7 +91,9 @@ const ParamRange param_ranges[] = {
     {1, 500},        // IMU_FILTER
     {1, 500},        // SERVO_FILTER
     {1, 500},        // ANGACC_FILTER
-    {0, 10}        // STEER_BY_ANGACC_RATE
+    {0, 10},        // STEER_BY_ANGACC_RATE
+    {-1, 1},        // GYRO_EXP
+    {-1, 1}         // OUTPUT_EXP
 };
 
 // 参数名称数组
@@ -103,7 +109,9 @@ const char* param_names[] = {
     "IMU_FILTER",
     "SERVO_FILTER",
     "ANGACC_FILTER",
-    "STEER_BY_ANGACC_RATE"
+    "STEER_BY_ANGACC_RATE",
+    "GYRO_EXP",
+    "OUTPUT_EXP"
 };
 
 // 低通滤波器类
@@ -150,42 +158,57 @@ struct KinematicState {
 
 // 坐标旋转函数 - 根据飞控板安装方向调整传感器数据
 void rotateSensorData(float &accel_x, float &accel_y, float &gyro_z, int rotation_deg) {
-  float temp_accel_x, temp_accel_y;
-  float temp_gyro_z = gyro_z;
-  
-  switch(rotation_deg) {
-    case 0:   // 标准安装，无需旋转
-      // 保持不变
-      break;
-      
-    case 90:  // 顺时针旋转90度
-      temp_accel_x = accel_y;    // 原Y轴变为X轴
-      temp_accel_y = -accel_x;   // 原负X轴变为Y轴
-      // 角速度方向不变（绕Z轴旋转）
-      accel_x = temp_accel_x;
-      accel_y = temp_accel_y;
-      break;
-      
-    case 180: // 旋转180度
-      accel_x = -accel_x;
-      accel_y = -accel_y;
-      // 角速度方向不变
-      break;
-      
-    case 270: // 顺时针旋转270度（或逆时针90度）
-      temp_accel_x = -accel_y;   // 原负Y轴变为X轴
-      temp_accel_y = accel_x;    // 原X轴变为Y轴
-      // 角速度方向不变
-      accel_x = temp_accel_x;
-      accel_y = temp_accel_y;
-      break;
-      
-    default:
-      // 无效旋转角度，保持不变
-      uart.print("警告: 无效的旋转角度: ");
-      uart.println((int)rotation_deg);
-      break;
+  // 规范化角度到0-359度范围
+  rotation_deg = rotation_deg % 360;
+  if (rotation_deg < 0) {
+    rotation_deg += 360;
   }
+  
+  // 如果角度是0度，无需旋转
+  if (rotation_deg == 0) {
+    return;
+  }
+  
+  // 将角度转换为弧度
+  float theta = rotation_deg * M_PI / 180.0;
+  
+  // 计算旋转矩阵（2D平面旋转）
+  float cos_theta = cos(theta);
+  float sin_theta = sin(theta);
+  
+  // 应用旋转矩阵到加速度数据
+  float temp_accel_x = accel_x * cos_theta - accel_y * sin_theta;
+  float temp_accel_y = accel_x * sin_theta + accel_y * cos_theta;
+  
+  // 更新加速度值
+  accel_x = temp_accel_x;
+  accel_y = temp_accel_y;
+  
+  // 注意：角速度方向不变（绕Z轴旋转）
+  // gyro_z保持不变
+}
+
+// S型曲线处理函数
+float applySCurve(float input, float exp_param, bool use_limits = false, float limit_positive = 1.0, float limit_negative = 1.0) {
+    if (fabs(input) < 0.001f) return 0.0f; // 处理零输入
+    
+    float exponent = pow(10.0f, exp_param);
+    
+    if (input > 0) {
+        // 正输入: y = x^(10^a)
+        float result = pow(input, exponent);
+        if (use_limits) {
+            result *= limit_positive;
+        }
+        return result;
+    } else {
+        // 负输入: y = -|x|^(10^a)
+        float result = -pow(fabs(input), exponent);
+        if (use_limits) {
+            result *= limit_negative;
+        }
+        return result;
+    }
 }
 
 // PWM输入中断服务函数（保持不变）
@@ -251,38 +274,48 @@ void calculateKinematicState(float accel_x, float accel_y, float angular_vel,
 
 // 简化版反打控制函数 - 维持原有接口
 float calculateCounterSteerByKinematics(const KinematicState &state, float gain) {
-  // 参数定义
-  const float ACCEL_GAIN = current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
-  const float GYRO_GAIN = 1.0f;     // 角速度增益系数
-  const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE;   //角加速度增益系数
-  const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
-  const float DEADBAND_GYRO = 0.5f;  // 角速度死区 (度/秒)
-  
-  float counter_steer = 0.0f;
-  
-  //基于横向加速度的反打分量
-  if (fabs(state.accel_y) > DEADBAND_ACCEL) {
-    // 加速度与反打方向相反
-    float accel_component = -state.accel_y * ACCEL_GAIN;
-    counter_steer += accel_component;
-  }
-  //基于角速度的反打分量
-  if (fabs(state.angular_vel) > DEADBAND_GYRO) {
-    // 角速度与反打方向相同
-    float gyro_component = state.angular_vel * GYRO_GAIN;
-    counter_steer += gyro_component;
-    //基于角加速度的反打预测
-    float angacc_component = current_params.ANGACC_FILTER * (state.angular_vel-angular_accel_integral);
-    angular_accel_integral += angacc_component;
-    angacc_component *= ANGACC_GAIN/current_params.LOOP_FREQUENCY;
-    //counter_steer += angacc_component;
-  }
-  //应用感度调节
-  counter_steer *= gain*current_params.K_GAIN;
-  //限制输出范围
-  counter_steer = constrain(counter_steer, -current_params.COUNTER_STEER_RANGE, current_params.COUNTER_STEER_RANGE);
-  
-  return counter_steer;
+    // 参数定义
+    const float ACCEL_GAIN = current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
+    const float GYRO_GAIN = 1.0f;     // 角速度增益系数
+    const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE;   //角加速度增益系数
+    const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
+    const float DEADBAND_GYRO = 0.5f;  // 角速度死区 (度/秒)
+    
+    float counter_steer = 0.0f;
+    
+    //基于横向加速度的反打分量
+    if (fabs(state.accel_x) > DEADBAND_ACCEL) {
+        // 加速度与反打方向相反
+        float accel_component = state.accel_x * ACCEL_GAIN;
+        counter_steer += accel_component;
+    }
+    //基于角速度的反打分量
+    if (fabs(state.angular_vel) > DEADBAND_GYRO) {
+        // 角速度与反打方向相同
+        float gyro_component = state.angular_vel * GYRO_GAIN;
+        counter_steer += gyro_component;
+        //基于角加速度的反打预测
+        float angacc_component = current_params.ANGACC_FILTER * (state.angular_vel-angular_accel_integral);
+        angular_accel_integral += angacc_component;
+        angacc_component *= ANGACC_GAIN/current_params.LOOP_FREQUENCY;
+        //counter_steer += angacc_component;
+    }
+    
+    //应用感度调节
+    counter_steer *= gain*current_params.K_GAIN;
+    
+    // 应用陀螺仪输出的S型曲线
+    if (fabs(current_params.GYRO_EXP) > 0.001f) {
+        // 归一化到[-1,1]范围进行处理
+        float normalized_steer = counter_steer / current_params.COUNTER_STEER_RANGE;
+        normalized_steer = applySCurve(normalized_steer, current_params.GYRO_EXP);
+        counter_steer = normalized_steer * current_params.COUNTER_STEER_RANGE;
+    }
+    
+    //限制输出范围
+    counter_steer = constrain(counter_steer, -current_params.COUNTER_STEER_RANGE, current_params.COUNTER_STEER_RANGE);
+    
+    return counter_steer;
 }
 
 // 计算感度系数
@@ -297,22 +330,30 @@ float calculateGain() {
 
 // 输出到舵机 - 使用CH1通道
 void outputServo(float steering_input, float correction) {
-  if (steering_input < 1000 || steering_input > 2000) {
-    steering_input = PWM_NEUTRAL;
-  }
-  
-  float normalized_input = (steering_input - 1500) / 500.0;
-  float final_output = normalized_input + correction;
-  final_output = constrain(final_output, -current_params.SERVO_LIMIT_LEFT, current_params.SERVO_LIMIT_RIGHT);
-  
-  int pwm_output_raw = PWM_NEUTRAL + (int)(final_output * 500);
-  pwm_output_raw = constrain(pwm_output_raw, PWM_MIN, PWM_MAX);
-  
-  float normalized_filtered = servo_filter.update((pwm_output_raw - 1500) / 500.0);
-  uint16_t filtered_pwm = PWM_NEUTRAL + (int)(normalized_filtered * 500);
-  
-  // 使用CH1通道输出
-  PWMOutput::setPulse(SERVO_OUT_CHANNEL, filtered_pwm);
+    if (steering_input < 1000 || steering_input > 2000) {
+        steering_input = PWM_NEUTRAL;
+    }
+    
+    float normalized_input = (steering_input - 1500) / 500.0;
+    float final_output = normalized_input + correction;
+    
+    // 应用舵机输出的S型曲线
+    if (fabs(current_params.OUTPUT_EXP) > 0.001f) {
+        final_output = applySCurve(final_output, current_params.OUTPUT_EXP, true, 
+                                 current_params.SERVO_LIMIT_RIGHT, current_params.SERVO_LIMIT_LEFT);
+    } else {
+        // 如果没有S曲线，使用线性限制
+        final_output = constrain(final_output, -current_params.SERVO_LIMIT_LEFT, current_params.SERVO_LIMIT_RIGHT);
+    }
+    
+    int pwm_output_raw = PWM_NEUTRAL + (int)(final_output * 500);
+    pwm_output_raw = constrain(pwm_output_raw, PWM_MIN, PWM_MAX);
+    
+    float normalized_filtered = servo_filter.update((pwm_output_raw - 1500) / 500.0);
+    uint16_t filtered_pwm = PWM_NEUTRAL + (int)(normalized_filtered * 500);
+    
+    // 使用CH1通道输出
+    PWMOutput::setPulse(SERVO_OUT_CHANNEL, filtered_pwm);
 }
 
 // 精确循环频率控制
@@ -371,6 +412,8 @@ void initializeDefaultParams() {
     current_params.SERVO_FILTER = DEFAULT_SERVO_FILTER;
     current_params.ANGACC_FILTER = DEFAULT_ANGACC_FILTER;
     current_params.STEER_BY_ANGACC_RATE = DEFAULT_STEER_BY_ANGACC_RATE;
+    current_params.GYRO_EXP = DEFAULT_GYRO_EXP;
+    current_params.OUTPUT_EXP = DEFAULT_OUTPUT_EXP;
 }
 
 bool validateParamRange(uint8_t param_index, float value) {
@@ -597,7 +640,7 @@ void loop() {
         
         KinematicState state;
         // 调用时传入旋转角度参数
-        calculateKinematicState(accel_x_filt, accel_y_filt, gyro_z_filt, state, current_params.BOARD_ROTATION-90);
+        calculateKinematicState(accel_x_filt, accel_y_filt, gyro_z_filt, state, current_params.BOARD_ROTATION);
         
         float gain = calculateGain();
         float correction = calculateCounterSteerByKinematics(state, gain);

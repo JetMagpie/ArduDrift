@@ -106,6 +106,10 @@ report off
 | `STEER_BY_ACC_RATE` | 2 | 0-20 | Lateral acceleration contribution ratio |
 | `COUNTER_STEER_RANGE` | 0.85 | 0-1.0 | Maximum counter-steering output range |
 | `STEER_BY_ANGACC_RATE` | 1 | 0-10 | Angular acceleration contribution ratio |
+| `STEER_BY_ANGVEL_RATE` | 1 | 0-20 | Angular velocity contribution ratio |
+| `STEER_BY_ANG_RATE` | 2 | 0-20 | Angle integration contribution ratio |
+| `STEER_BY_ANG_LIMIT` | 40 | 10-90 | Maximum angle integration limit (degrees) |
+| `ANGVEL_ZERO` | 0 | -20-20 | Gyroscope zero offset calibration |
 | `GYRO_EXP` | 0 | -1 to 1 | Gyro output S-curve exponent (0=linear) |
 | `OUTPUT_EXP` | 0 | -1 to 1 | Servo output S-curve exponent (0=linear) |
 
@@ -139,7 +143,12 @@ The system uses a simplified physics-based approach:
    - Right rotation (negative angular_vel) → Left counter-steer (negative output)
    - Left rotation (positive angular_vel) → Right counter-steer (positive output)
 
-3. **S-Curve Response**:
+3. **Angle Integration Component
+   - Integrates angular velocity over time to track drift angle
+   - Provides sustained counter-steering
+   - Prevents integral windup with configurable saturation limits
+
+4. **S-Curve Response**:
    - **Gyro Output S-Curve** (`GYRO_EXP`): Adjusts sensitivity distribution in counter-steering calculation
      - Positive values: More sensitive in mid-range, less sensitive at extremes
      - Negative values: Less sensitive in mid-range, more sensitive at extremes
@@ -148,7 +157,7 @@ The system uses a simplified physics-based approach:
      - Same exponential behavior applied to combined steering and correction signals
      - Allows fine-tuning of steering feel and response characteristics
 
-4. **Combined Output**:
+5. **Combined Output**:
    - Both components are summed and scaled by user gain
    - Final output limited to ±1.0 for servo safety
 
@@ -160,13 +169,7 @@ The system uses a simplified physics-based approach:
 
 ## Parameter Tuning
 
-Current default parameters work well for medium-speed drifting. Ongoing optimization includes:
-
-- **ACCEL_GAIN**: 0.075 (lateral acceleration sensitivity)
-- **GYRO_GAIN**: 0.015 (rotation sensitivity)
-- **Filter Cutoffs**: 5-20Hz depending on application
-
-**Note**: Parameters are continuously updated based on track testing. Future versions will provide better presets for different driving styles and track conditions.
+Current default parameters work well for medium-speed drifting. Parameters are continuously updated based on track testing. Future versions will provide better presets for different driving styles and track conditions.
 
 ## Development Notes
 

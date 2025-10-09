@@ -21,23 +21,31 @@ struct SystemParams {
     float STEER_BY_ANGACC_RATE;
     float GYRO_EXP; 
     float OUTPUT_EXP; 
+    float STEER_BY_ANGVEL_RATE;
+    float STEER_BY_ANG_RATE;
+    float STEER_BY_ANG_LIMIT;
+    float ANGVEL_ZERO;
 };
 
 // 默认参数值
 #define DEFAULT_BOARD_ROTATION 270
-#define DEFAULT_K_GAIN 0.015
+#define DEFAULT_K_GAIN 0.01
 #define DEFAULT_DEFAULT_GAIN 200
-#define DEFAULT_STEER_BY_ACC_RATE 2
-#define DEFAULT_COUNTER_STEER_RANGE 0.85
+#define DEFAULT_STEER_BY_ACC_RATE 1.5
+#define DEFAULT_COUNTER_STEER_RANGE 0.95
 #define DEFAULT_SERVO_LIMIT_LEFT 1
-#define DEFAULT_SERVO_LIMIT_RIGHT 0.9
-#define DEFAULT_LOOP_FREQUENCY 500
-#define DEFAULT_IMU_FILTER 20
-#define DEFAULT_SERVO_FILTER 20
-#define DEFAULT_ANGACC_FILTER 10
+#define DEFAULT_SERVO_LIMIT_RIGHT 1
+#define DEFAULT_LOOP_FREQUENCY 100
+#define DEFAULT_IMU_FILTER 30
+#define DEFAULT_SERVO_FILTER 30
+#define DEFAULT_ANGACC_FILTER 20
 #define DEFAULT_STEER_BY_ANGACC_RATE 1
 #define DEFAULT_GYRO_EXP 0
 #define DEFAULT_OUTPUT_EXP 0
+#define DEFAULT_STEER_BY_ANGVEL_RATE 1
+#define DEFAULT_STEER_BY_ANG_RATE 2
+#define DEFAULT_STEER_BY_ANG_LIMIT 40
+#define DEFAULT_ANGVEL_ZERO 0.0
 
 // EEPROM管理器
 EEPROM_Manager eeprom(0);
@@ -93,7 +101,11 @@ const ParamRange param_ranges[] = {
     {1, 500},        // ANGACC_FILTER
     {0, 10},        // STEER_BY_ANGACC_RATE
     {-1, 1},        // GYRO_EXP
-    {-1, 1}         // OUTPUT_EXP
+    {-1, 1},         // OUTPUT_EXP
+    {0, 20},        // STEER_BY_ANGVEL_RATE
+    {0, 20},        // STEER_BY_ANG_RATE
+    {10, 90},      // STEER_BY_ANG_LIMIT
+    {-20, 20}       // ANGVEL_ZERO
 };
 
 // 参数名称数组
@@ -111,7 +123,11 @@ const char* param_names[] = {
     "ANGACC_FILTER",
     "STEER_BY_ANGACC_RATE",
     "GYRO_EXP",
-    "OUTPUT_EXP"
+    "OUTPUT_EXP",
+    "STEER_BY_ANGVEL_RATE",
+    "STEER_BY_ANG_RATE",
+    "STEER_BY_ANG_LIMIT",
+    "ANGVEL_ZERO"
 };
 
 // 低通滤波器类
@@ -293,16 +309,33 @@ void calculateKinematicState(float accel_x, float accel_y, float angular_vel,
   float total_accel_ms2 = state.total_accel * 9.81;
 }
 
-// 简化版反打控制函数 - 维持原有接口
+// 修改后的反打控制函数
 float calculateCounterSteerByKinematics(const KinematicState &state, float gain) {
     // 参数定义
     const float ACCEL_GAIN = current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
-    const float GYRO_GAIN = 1.0f;     // 角速度增益系数
-    const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE;   //角加速度增益系数
+    const float GYRO_GAIN = current_params.STEER_BY_ANGVEL_RATE;   // 角速度增益系数 - 改为可调参数
+    const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE; // 角加速度增益系数
     const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
-    const float DEADBAND_GYRO = 0.5f;  // 角速度死区 (度/秒)
+    const float DEADBAND_GYRO = 0.8f;  // 角速度死区 (度/秒)
+    const uint32_t DEADBAND_TIMEOUT_MS = 25; // 角速度死区超时时间(ms)
+    
+    static float angle_integral = 0.0f; // 角度积分器
+    static uint32_t last_gyro_active_time = 0; // 上次角速度活跃时间
+    static bool first_run = true; // 首次运行标志
     
     float counter_steer = 0.0f;
+    
+    // 获取当前时间
+    uint32_t current_time = millis();
+    
+    // 初始化时间戳
+    if (first_run) {
+        last_gyro_active_time = current_time;
+        first_run = false;
+    }
+    
+    // 应用角速度零偏校准
+    float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
     
     //基于横向加速度的反打分量
     if (fabs(state.accel_x) > DEADBAND_ACCEL) {
@@ -310,20 +343,46 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
         float accel_component = state.accel_x * ACCEL_GAIN;
         counter_steer += accel_component;
     }
-    //基于角速度的反打分量
-    if (fabs(state.angular_vel) > DEADBAND_GYRO) {
-        // 角速度与反打方向相同
-        float gyro_component = state.angular_vel * GYRO_GAIN;
-        counter_steer += gyro_component;
-        //基于角加速度的反打预测
-        float angacc_component = current_params.ANGACC_FILTER * (state.angular_vel-angular_accel_integral);
-        angular_accel_integral += angacc_component;
-        angacc_component *= ANGACC_GAIN/current_params.LOOP_FREQUENCY;
-        //counter_steer += angacc_component;
-    }
     
+    //基于角速度的反打分量
+    if (fabs(calibrated_angular_vel) > DEADBAND_GYRO) {
+        // 更新角速度活跃时间
+        last_gyro_active_time = current_time;
+        
+        // 角速度与反打方向相同
+        float gyro_component = calibrated_angular_vel * GYRO_GAIN;
+        counter_steer += gyro_component;
+        
+        //基于角加速度的反打预测
+        float angacc_component = current_params.ANGACC_FILTER * (calibrated_angular_vel - angular_accel_integral);
+        angular_accel_integral += angacc_component;
+        angacc_component *= ANGACC_GAIN / current_params.LOOP_FREQUENCY;
+        //counter_steer += angacc_component;
+        
+        // 角度积分项 - 只在未达到饱和限制时积分
+        float angle_increment = calibrated_angular_vel;
+        
+        // 检查积分饱和限制
+        if (fabs(angle_integral + angle_increment) <= current_params.STEER_BY_ANG_LIMIT*current_params.LOOP_FREQUENCY) {
+            angle_integral += angle_increment;
+        }
+
+        //去除循环周期影响
+        float real_angle = angle_integral/ current_params.LOOP_FREQUENCY;
+        float angle_component = real_angle * current_params.STEER_BY_ANG_RATE;
+        counter_steer += angle_component;
+    }
+    else {
+        // 角速度在死区内，检查是否需要清零积分器
+        if (current_time - last_gyro_active_time > DEADBAND_TIMEOUT_MS) {
+            angle_integral = 0.0f;
+        }
+        float real_angle = angle_integral/ current_params.LOOP_FREQUENCY;
+        float angle_component = real_angle * current_params.STEER_BY_ANG_RATE;
+        counter_steer += angle_component;
+    }
     //应用感度调节
-    counter_steer *= gain*current_params.K_GAIN;
+    counter_steer *= gain * current_params.K_GAIN;
     
     // 应用陀螺仪输出的S型曲线
     if (fabs(current_params.GYRO_EXP) > 0.001f) {
@@ -396,6 +455,8 @@ void controlLoopFrequency() {
 void printKinematicData(const KinematicState &state, float correction) {
   if (!report_enabled) return;
   
+  float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
+  
   uart.print("IN_STEER:");
   uart.print((int)steering_pwm);
   uart.print(" IN_GAIN:");
@@ -410,7 +471,7 @@ void printKinematicData(const KinematicState &state, float correction) {
   uart.print(")g");
   
   uart.print(" | ω:");
-  uart.print(state.angular_vel, 1);
+  uart.print(calibrated_angular_vel, 1);
   uart.print("dps");
   
   uart.print(" | Correction:");
@@ -435,6 +496,10 @@ void initializeDefaultParams() {
     current_params.STEER_BY_ANGACC_RATE = DEFAULT_STEER_BY_ANGACC_RATE;
     current_params.GYRO_EXP = DEFAULT_GYRO_EXP;
     current_params.OUTPUT_EXP = DEFAULT_OUTPUT_EXP;
+    current_params.STEER_BY_ANGVEL_RATE = DEFAULT_STEER_BY_ANGVEL_RATE;
+    current_params.STEER_BY_ANG_RATE = DEFAULT_STEER_BY_ANG_RATE;
+    current_params.STEER_BY_ANG_LIMIT = DEFAULT_STEER_BY_ANG_LIMIT;
+    current_params.ANGVEL_ZERO = DEFAULT_ANGVEL_ZERO;
 }
 
 bool validateParamRange(uint8_t param_index, float value) {

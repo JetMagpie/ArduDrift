@@ -13,13 +13,34 @@ A comprehensive tuning and monitoring application for ardudrift control system.
 
 ## Supported Parameters
 
-- Board rotation and installation orientation
-- Gain settings (K_GAIN, DEFAULT_GAIN)
-- Steering response rates (STEER_BY_ACC_RATE, STEER_BY_ANGACC_RATE)
-- Servo limits and ranges
-- Filter settings (IMU, SERVO, ANGACC filters)
-- Loop frequency control
-- S-curve exponents (GYRO_EXP, OUTPUT_EXP)
+### System Parameters
+- **BOARD_ROTATION**: Flight controller installation orientation (0-360°)
+- **K_GAIN**: Overall sensitivity multiplier
+- **DEFAULT_GAIN**: Default gain when no input signal
+- **LOOP_FREQUENCY**: Main control loop frequency (50-1000Hz)
+
+### Control Parameters
+- **STEER_BY_ACC_RATE**: Lateral acceleration contribution ratio
+- **STEER_BY_ANGVEL_RATE**: Angular velocity contribution ratio (NEW)
+- **STEER_BY_ANG_RATE**: Angle integration contribution ratio (NEW)
+- **STEER_BY_ANGACC_RATE**: Angular acceleration contribution ratio
+- **STEER_BY_ANG_LIMIT**: Maximum angle integration limit (NEW)
+- **COUNTER_STEER_RANGE**: Maximum counter-steering output range
+- **ANGVEL_ZERO**: Gyroscope zero offset calibration (NEW)
+
+### Servo Parameters
+- **SERVO_LIMIT_LEFT**: Left servo limit (0.0-1.0)
+- **SERVO_LIMIT_RIGHT**: Right servo limit (0.0-1.0)
+
+### Filter Parameters
+- **IMU_FILTER**: IMU sensor filter cutoff frequency
+- **SERVO_FILTER**: Servo output filter for smoothing
+- **ANGACC_FILTER**: Angular acceleration filter
+
+### S-Curve Parameters
+- **GYRO_EXP**: Gyro output S-curve exponent (-1 to 1)
+- **OUTPUT_EXP**: Servo output S-curve exponent (-1 to 1)
+
 
 ## Data Monitoring
 

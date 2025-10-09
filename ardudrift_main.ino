@@ -192,23 +192,44 @@ void rotateSensorData(float &accel_x, float &accel_y, float &gyro_z, int rotatio
 float applySCurve(float input, float exp_param, bool use_limits = false, float limit_positive = 1.0, float limit_negative = 1.0) {
     if (fabs(input) < 0.001f) return 0.0f; // 处理零输入
     
-    float exponent = pow(10.0f, exp_param);
-    
-    if (input > 0) {
-        // 正输入: y = x^(10^a)
-        float result = pow(input, exponent);
+    // 当a接近0时，使用线性函数
+    if (fabs(exp_param) < 0.001f) {
+        float result = input;
         if (use_limits) {
-            result *= limit_positive;
-        }
-        return result;
-    } else {
-        // 负输入: y = -|x|^(10^a)
-        float result = -pow(fabs(input), exponent);
-        if (use_limits) {
-            result *= limit_negative;
+            if (input > 0) {
+                result *= limit_positive;
+            } else {
+                result *= limit_negative;
+            }
         }
         return result;
     }
+    
+    float abs_x = fabs(input);
+    float sign_x = (input > 0) ? 1.0f : -1.0f;
+    
+    // 计算100^a
+    float base_pow_a = pow(100.0f, exp_param);
+    
+    // 计算分子部分：((100^a)^(|x|) / (100^a)) - (1/(100^a))
+    float numerator = (pow(base_pow_a, abs_x) / base_pow_a) - (1.0f / base_pow_a);
+    
+    // 计算分母部分：1 - (1/(100^a))
+    float denominator = 1.0f - (1.0f / base_pow_a);
+    
+    // 最终结果
+    float result = sign_x * (numerator / denominator);
+    
+    // 应用边界限制
+    if (use_limits) {
+        if (input > 0) {
+            result *= limit_positive;
+        } else {
+            result *= limit_negative;
+        }
+    }
+    
+    return result;
 }
 
 // PWM输入中断服务函数（保持不变）

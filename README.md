@@ -143,7 +143,6 @@ The system uses a simplified physics-based approach:
    - **Gyro Output S-Curve** (`GYRO_EXP`): Adjusts sensitivity distribution in counter-steering calculation
      - Positive values: More sensitive in mid-range, less sensitive at extremes
      - Negative values: Less sensitive in mid-range, more sensitive at extremes
-     - Formula: `y = x^(10^GYRO_EXP)` for positive inputs, `y = -|x|^(10^GYRO_EXP)` for negative inputs
    
    - **Servo Output S-Curve** (`OUTPUT_EXP`): Adjusts sensitivity distribution in final servo output
      - Same exponential behavior applied to combined steering and correction signals

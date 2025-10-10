@@ -490,22 +490,22 @@ class MainWindow(QMainWindow):
         # 参数定义 - 与Arduino代码中的参数对应
         self.parameters = [
             {"name": "BOARD_ROTATION", "min": 0, "max": 360, "default": 270, "decimals": 0},
-            {"name": "K_GAIN", "min": 0.001, "max": 0.02, "default": 0.015, "decimals": 4},
+            {"name": "K_GAIN", "min": 0.001, "max": 0.02, "default": 0.0134, "decimals": 4},
             {"name": "DEFAULT_GAIN", "min": 0, "max": 500, "default": 200, "decimals": 0},
-            {"name": "STEER_BY_ACC_RATE", "min": 0, "max": 20, "default": 2, "decimals": 1},
-            {"name": "COUNTER_STEER_RANGE", "min": 0, "max": 1.0, "default": 0.85, "decimals": 2},
+            {"name": "STEER_BY_ACC_RATE", "min": 0, "max": 20, "default": 1.5, "decimals": 1},
+            {"name": "COUNTER_STEER_RANGE", "min": 0, "max": 1.0, "default": 0.95, "decimals": 2},
             {"name": "SERVO_LIMIT_LEFT", "min": 0, "max": 1.0, "default": 1.0, "decimals": 2},
             {"name": "SERVO_LIMIT_RIGHT", "min": 0, "max": 1.0, "default": 1.0, "decimals": 2},
             {"name": "LOOP_FREQUENCY", "min": 50, "max": 1000, "default": 100, "decimals": 0},
-            {"name": "IMU_FILTER", "min": 1, "max": 200, "default": 20, "decimals": 0},
-            {"name": "SERVO_FILTER", "min": 1, "max": 200, "default": 20, "decimals": 0},
-            {"name": "ANGACC_FILTER", "min": 1, "max": 200, "default": 10, "decimals": 0},
+            {"name": "IMU_FILTER", "min": 1, "max": 200, "default": 30, "decimals": 0},
+            {"name": "SERVO_FILTER", "min": 1, "max": 200, "default": 30, "decimals": 0},
+            {"name": "ANGACC_FILTER", "min": 1, "max": 200, "default": 20, "decimals": 0},
             {"name": "STEER_BY_ANGACC_RATE", "min": 0, "max": 5, "default": 1, "decimals": 2},
-            {"name": "GYRO_EXP", "min": -1, "max": 1, "default": 0, "decimals": 2},
+            {"name": "GYRO_EXP", "min": -1, "max": 1, "default": -0.18, "decimals": 2},
             {"name": "OUTPUT_EXP", "min": -1, "max": 1, "default": 0, "decimals": 2},
-            {"name": "STEER_BY_ANGVEL_RATE", "min": 0, "max": 5, "default": 1.0, "decimals": 2},
-            {"name": "STEER_BY_ANG_RATE", "min": 0, "max": 5, "default": 1.0, "decimals": 2},
-            {"name": "STEER_BY_ANG_LIMIT", "min": 10, "max": 90, "default": 30.0, "decimals": 0},
+            {"name": "STEER_BY_ANGVEL_RATE", "min": 0, "max": 5, "default": 0.9, "decimals": 2},
+            {"name": "STEER_BY_ANG_RATE", "min": 0, "max": 5, "default": 1.55, "decimals": 2},
+            {"name": "STEER_BY_ANG_LIMIT", "min": 10, "max": 90, "default": 40.0, "decimals": 0},
             {"name": "ANGVEL_ZERO", "min": -5, "max": 5, "default": 0.0, "decimals": 2}
         ]
         

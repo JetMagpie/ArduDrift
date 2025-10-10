@@ -29,7 +29,7 @@ struct SystemParams {
 
 // 默认参数值
 #define DEFAULT_BOARD_ROTATION 270
-#define DEFAULT_K_GAIN 0.01
+#define DEFAULT_K_GAIN 0.0134
 #define DEFAULT_DEFAULT_GAIN 200
 #define DEFAULT_STEER_BY_ACC_RATE 1.5
 #define DEFAULT_COUNTER_STEER_RANGE 0.95
@@ -40,10 +40,10 @@ struct SystemParams {
 #define DEFAULT_SERVO_FILTER 30
 #define DEFAULT_ANGACC_FILTER 20
 #define DEFAULT_STEER_BY_ANGACC_RATE 1
-#define DEFAULT_GYRO_EXP 0
+#define DEFAULT_GYRO_EXP -0.18
 #define DEFAULT_OUTPUT_EXP 0
-#define DEFAULT_STEER_BY_ANGVEL_RATE 1
-#define DEFAULT_STEER_BY_ANG_RATE 2
+#define DEFAULT_STEER_BY_ANGVEL_RATE 0.9
+#define DEFAULT_STEER_BY_ANG_RATE 1.55
 #define DEFAULT_STEER_BY_ANG_LIMIT 40
 #define DEFAULT_ANGVEL_ZERO 0.0
 
@@ -317,7 +317,7 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
     const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE; // 角加速度增益系数
     const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
     const float DEADBAND_GYRO = 0.8f;  // 角速度死区 (度/秒)
-    const uint32_t DEADBAND_TIMEOUT_MS = 25; // 角速度死区超时时间(ms)
+    const uint32_t DEADBAND_TIMEOUT_MS = 250; // 角速度死区超时时间(ms)
     
     static float angle_integral = 0.0f; // 角度积分器
     static uint32_t last_gyro_active_time = 0; // 上次角速度活跃时间

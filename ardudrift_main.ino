@@ -25,27 +25,29 @@ struct SystemParams {
     float STEER_BY_ANG_RATE;
     float STEER_BY_ANG_LIMIT;
     float ANGVEL_ZERO;
+    float ANG_HALF_LIFE;
 };
 
 // 默认参数值
 #define DEFAULT_BOARD_ROTATION 270
-#define DEFAULT_K_GAIN 0.0134
+#define DEFAULT_K_GAIN 0.003
 #define DEFAULT_DEFAULT_GAIN 200
-#define DEFAULT_STEER_BY_ACC_RATE 1.5
+#define DEFAULT_STEER_BY_ACC_RATE 0.5
 #define DEFAULT_COUNTER_STEER_RANGE 0.95
 #define DEFAULT_SERVO_LIMIT_LEFT 1
 #define DEFAULT_SERVO_LIMIT_RIGHT 1
 #define DEFAULT_LOOP_FREQUENCY 100
 #define DEFAULT_IMU_FILTER 30
-#define DEFAULT_SERVO_FILTER 30
-#define DEFAULT_ANGACC_FILTER 20
+#define DEFAULT_SERVO_FILTER 120
+#define DEFAULT_ANGACC_FILTER 30
 #define DEFAULT_STEER_BY_ANGACC_RATE 1
 #define DEFAULT_GYRO_EXP -0.18
 #define DEFAULT_OUTPUT_EXP 0
-#define DEFAULT_STEER_BY_ANGVEL_RATE 0.9
-#define DEFAULT_STEER_BY_ANG_RATE 1.55
-#define DEFAULT_STEER_BY_ANG_LIMIT 40
+#define DEFAULT_STEER_BY_ANGVEL_RATE 1.1
+#define DEFAULT_STEER_BY_ANG_RATE 1.0
+#define DEFAULT_STEER_BY_ANG_LIMIT 90
 #define DEFAULT_ANGVEL_ZERO 0.0
+#define DEFAULT_ANG_HALF_LIFE 0.15
 
 // EEPROM管理器
 EEPROM_Manager eeprom(0);
@@ -66,8 +68,8 @@ MPU6000 mpu;
 // 引脚和pwm信号设定
 #define STEERING_IN_PIN 2
 #define GAIN_IN_PIN 3
-#define PWM_MIN 1000
-#define PWM_MAX 2000
+#define PWM_MIN 800
+#define PWM_MAX 2200//限位现在扩展到800到2200
 #define PWM_NEUTRAL 1500
 #define INPUT_TIMEOUT_MS 500
 
@@ -89,7 +91,7 @@ struct ParamRange {
 // 参数验证范围
 const ParamRange param_ranges[] = {
     {0, 360},       // BOARD_ROTATION
-    {0.001, 0.1},   // K_GAIN
+    {-0.1, 0.1},   // K_GAIN
     {0, 500},      // DEFAULT_GAIN
     {0, 20},      // STEER_BY_ACC_RATE
     {0, 1.0},     // COUNTER_STEER_RANGE
@@ -105,7 +107,8 @@ const ParamRange param_ranges[] = {
     {0, 20},        // STEER_BY_ANGVEL_RATE
     {0, 20},        // STEER_BY_ANG_RATE
     {10, 90},      // STEER_BY_ANG_LIMIT
-    {-20, 20}       // ANGVEL_ZERO
+    {-20, 20},       // ANGVEL_ZERO
+    {0.001,2}        // ANG_HALF_LIFE
 };
 
 // 参数名称数组
@@ -127,7 +130,8 @@ const char* param_names[] = {
     "STEER_BY_ANGVEL_RATE",
     "STEER_BY_ANG_RATE",
     "STEER_BY_ANG_LIMIT",
-    "ANGVEL_ZERO"
+    "ANGVEL_ZERO",
+    "ANG_HALF_LIFE"
 };
 
 // 低通滤波器类
@@ -254,7 +258,7 @@ void steeringISR() {
     steering_start = micros();
   } else {
     uint32_t pulse_width = micros() - steering_start;
-    if (pulse_width >= 800 && pulse_width <= 2200) {
+    if (pulse_width >= PWM_MIN && pulse_width <= PWM_MAX) {
       steering_pwm = pulse_width;
       steering_last_update = millis();
     }
@@ -266,7 +270,7 @@ void gainISR() {
     gain_start = micros();
   } else {
     uint32_t pulse_width = micros() - gain_start;
-    if (pulse_width >= 800 && pulse_width <= 2200) {
+    if (pulse_width >= PWM_MIN && pulse_width <= PWM_MAX) {
       gain_pwm = pulse_width;
       gain_last_update = millis();
     }
@@ -312,9 +316,10 @@ void calculateKinematicState(float accel_x, float accel_y, float angular_vel,
 // 修改后的反打控制函数
 float calculateCounterSteerByKinematics(const KinematicState &state, float gain) {
     // 参数定义
-    const float ACCEL_GAIN = current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
+    const float ACCEL_GAIN = 10*current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
     const float GYRO_GAIN = current_params.STEER_BY_ANGVEL_RATE;   // 角速度增益系数 - 改为可调参数
     const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE; // 角加速度增益系数
+    const float REDUCTION = pow(2.0, -1.0 / (current_params.LOOP_FREQUENCY*current_params.ANG_HALF_LIFE));
     const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
     const float DEADBAND_GYRO = 0.8f;  // 角速度死区 (度/秒)
     const uint32_t DEADBAND_TIMEOUT_MS = 250; // 角速度死区超时时间(ms)
@@ -337,13 +342,6 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
     // 应用角速度零偏校准
     float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
     
-    //基于横向加速度的反打分量
-    if (fabs(state.accel_x) > DEADBAND_ACCEL) {
-        // 加速度与反打方向相反
-        float accel_component = state.accel_x * ACCEL_GAIN;
-        counter_steer += accel_component;
-    }
-    
     //基于角速度的反打分量
     if (fabs(calibrated_angular_vel) > DEADBAND_GYRO) {
         // 更新角速度活跃时间
@@ -357,14 +355,18 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
         float angacc_component = current_params.ANGACC_FILTER * (calibrated_angular_vel - angular_accel_integral);
         angular_accel_integral += angacc_component;
         angacc_component *= ANGACC_GAIN / current_params.LOOP_FREQUENCY;
-        //counter_steer += angacc_component;
-        
+
         // 角度积分项 - 只在未达到饱和限制时积分
         float angle_increment = calibrated_angular_vel;
-        
+        if (fabs(state.accel_x) > DEADBAND_ACCEL) {//基于横向加速度的反打修正量
+            float accel_component = state.accel_x * ACCEL_GAIN;
+            angle_increment -= accel_component;
+        }//角加速度维持轨迹方向，横向加速度修正轨迹方向
+
         // 检查积分饱和限制
         if (fabs(angle_integral + angle_increment) <= current_params.STEER_BY_ANG_LIMIT*current_params.LOOP_FREQUENCY) {
             angle_integral += angle_increment;
+            angle_integral *= REDUCTION;//角度衰减
         }
 
         //去除循环周期影响
@@ -375,7 +377,7 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
     else {
         // 角速度在死区内，检查是否需要清零积分器
         if (current_time - last_gyro_active_time > DEADBAND_TIMEOUT_MS) {
-            angle_integral = 0.0f;
+            angle_integral *= REDUCTION;
         }
         float real_angle = angle_integral/ current_params.LOOP_FREQUENCY;
         float angle_component = real_angle * current_params.STEER_BY_ANG_RATE;
@@ -400,7 +402,7 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
 
 // 计算感度系数
 float calculateGain() {
-  if (gain_pwm < 1000 || gain_pwm > 2000) {
+  if (gain_pwm < PWM_MIN || gain_pwm > PWM_MAX) {
     return 0.5;
   }
   float normalized = (float)(gain_pwm - 1500) / 500.0;
@@ -410,7 +412,7 @@ float calculateGain() {
 
 // 输出到舵机 - 使用CH1通道
 void outputServo(float steering_input, float correction) {
-    if (steering_input < 1000 || steering_input > 2000) {
+    if (steering_input < PWM_MIN || steering_input > PWM_MAX) {
         steering_input = PWM_NEUTRAL;
     }
     
@@ -678,7 +680,7 @@ void setup() {
     // 初始化PWM输出系统
     PWMOutput::init();
     PWMOutput::enable(SERVO_OUT_CHANNEL);
-    PWMOutput::setFrequency(50);
+    PWMOutput::setFrequency(100);
     
     // 设置输入引脚和中断
     pinMode(STEERING_IN_PIN, INPUT);
@@ -698,11 +700,10 @@ void setup() {
     
     mpu.delay_ms(100);
     
-    uart.println("APM2.8 RC陀螺仪系统 - 使用输出1通道(CH1)");
-    uart.print("飞控板安装方向: ");
+    uart.println("APM2.8 RC gyro system");
+    uart.print("installation direction: ");
     uart.print((int)current_params.BOARD_ROTATION);
-    uart.println("度");
-    uart.println("舵机连接到引脚12");
+    uart.println("degree");
     uart.println("Serial commands: report on/off, get/set <param>, help");
     uart.println("Data reporting is OFF by default");
 }

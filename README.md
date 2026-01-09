@@ -42,6 +42,8 @@ An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight
 
 ## Installation & Programming
 
+**If you use the release version, you can install the .hex firmware via Ardudrift Tuner**
+
 1. **Software Setup**:
    - Install Arduino IDE
    - Add APM2.8 board support (if required)
@@ -96,38 +98,39 @@ report off
 | Parameter | Default Value | Valid Range | Description |
 |-----------|---------------|-------------|-------------|
 | `BOARD_ROTATION` | 90 | 0-360° | Flight controller installation angle |
-| `K_GAIN` | 0.015 | 0.001-0.1 | Overall sensitivity multiplier |
+| `K_GAIN` | 0.003 | -0.1-0.1 | Overall sensitivity multiplier, use a negative value to reverse servo rotation |
 | `DEFAULT_GAIN` | 200 | 0-500 | Default gain when no input signal |
 
 ### Control Parameters
 
 | Parameter | Default Value | Valid Range | Description |
 |-----------|---------------|-------------|-------------|
-| `STEER_BY_ACC_RATE` | 2 | 0-20 | Lateral acceleration contribution ratio |
-| `COUNTER_STEER_RANGE` | 0.85 | 0-1.0 | Maximum counter-steering output range |
+| `STEER_BY_ACC_RATE` | 0.5 | 0-20 | Reducing angle integration by lateral acceleration ratio |
+| `COUNTER_STEER_RANGE` | 0.95 | 0-1.0 | Maximum counter-steering output range |
 | `STEER_BY_ANGACC_RATE` | 1 | 0-10 | Angular acceleration contribution ratio |
-| `STEER_BY_ANGVEL_RATE` | 1 | 0-20 | Angular velocity contribution ratio |
-| `STEER_BY_ANG_RATE` | 2 | 0-20 | Angle integration contribution ratio |
-| `STEER_BY_ANG_LIMIT` | 40 | 10-90 | Maximum angle integration limit (degrees) |
+| `STEER_BY_ANGVEL_RATE` | 1.1 | 0-20 | Angular velocity contribution ratio |
+| `STEER_BY_ANG_RATE` | 1 | 0-20 | Angle integration contribution ratio |
+| `STEER_BY_ANG_LIMIT` | 90 | 10-90 | Maximum angle integration limit (degrees) |
 | `ANGVEL_ZERO` | 0 | -20-20 | Gyroscope zero offset calibration |
-| `GYRO_EXP` | 0 | -1 to 1 | Gyro output S-curve exponent (0=linear) |
+| `GYRO_EXP` | -0.18 | -1 to 1 | Gyro output S-curve exponent (0=linear) |
 | `OUTPUT_EXP` | 0 | -1 to 1 | Servo output S-curve exponent (0=linear) |
+| `ANG_HALF_LIFE` | 0.15 | 0.001 to 2 | Angle integration reducing time |
 
 ### Servo Parameters
 
 | Parameter | Default Value | Valid Range | Description |
 |-----------|---------------|-------------|-------------|
 | `SERVO_LIMIT_LEFT` | 1.0 | 0-1.0 | Left servo limit (1.0 = full range) |
-| `SERVO_LIMIT_RIGHT` | 0.9 | 0-1.0 | Right servo limit (1.0 = full range) |
+| `SERVO_LIMIT_RIGHT` | 1.0 | 0-1.0 | Right servo limit (1.0 = full range) |
 
 ### Filter Parameters
 
 | Parameter | Default Value | Valid Range | Description |
 |-----------|---------------|-------------|-------------|
-| `LOOP_FREQUENCY` | 500 | 50-1000Hz | Main control loop frequency |
-| `IMU_FILTER` | 20 | 1-500Hz | IMU sensor filter cutoff frequency |
-| `SERVO_FILTER` | 20 | 1-500Hz | Servo output filter for smoothing |
-| `ANGACC_FILTER` | 10 | 1-500Hz | Angular acceleration filter |
+| `LOOP_FREQUENCY` | 100 | 50-1000Hz | Main control loop frequency |
+| `IMU_FILTER` | 30 | 1-500Hz | IMU sensor filter cutoff frequency |
+| `SERVO_FILTER` | 120 | 1-500Hz | Servo output filter for smoothing |
+| `ANGACC_FILTER` | 30 | 1-500Hz | Angular acceleration filter |
 
 ## Control Algorithm
 
@@ -135,18 +138,19 @@ The system uses a simplified physics-based approach:
 
 ### Counter-Steering Components:
 
-1. **Lateral Acceleration Component**:
-   - Right slide (negative accel_y) → Right counter-steer (positive output)
-   - Left slide (positive accel_y) → Left counter-steer (negative output)
-
-2. **Angular Velocity Component**:
+1. **Angular Velocity Component**:
    - Right rotation (negative angular_vel) → Left counter-steer (negative output)
    - Left rotation (positive angular_vel) → Right counter-steer (positive output)
+   - Angular acceleration is used to improve response speed
 
-3. **Angle Integration Component
+2. **Angle Integration Component**:
    - Integrates angular velocity over time to track drift angle
    - Provides sustained counter-steering
    - Prevents integral windup with configurable saturation limits
+
+3. **Angular Integration Reduction**:
+   - Exponential decay with a half life variable
+   - Linear decay with lateral acceleration
 
 4. **S-Curve Response**:
    - **Gyro Output S-Curve** (`GYRO_EXP`): Adjusts sensitivity distribution in counter-steering calculation
@@ -182,7 +186,7 @@ Current default parameters work well for medium-speed drifting. Parameters are c
 1. **No Servo Movement**: Check OUTPUT 1 connection and 5V BEC power
 2. **No Receiver Input**: Verify OUTPUT 6 & 7 connections and receiver binding
 3. **Erratic Behavior**: Ensure stable 5V power supply and proper grounding
-4. **Wrong Direction**: Adjust `BOARD_ROTATION` parameter in code
+4. **Wrong Direction**: Adjust `BOARD_ROTATION` and 'K_GAIN' parameter
 5. **Serial Connection Issues**: Verify 115200 baud rate and correct COM port
 
 ## Contributing

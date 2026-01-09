@@ -4,8 +4,9 @@ import serial.tools.list_ports
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QVBoxLayout, QHBoxLayout, 
                              QWidget, QPushButton, QComboBox, QLabel, QSlider, 
                              QTextEdit, QGroupBox, QScrollArea, QGridLayout,
-                             QSplitter, QFrame, QMessageBox, QDialog)
-from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal, QObject
+                             QSplitter, QFrame, QMessageBox, QDialog, QFileDialog,
+                             QProgressDialog)
+from PyQt5.QtCore import Qt, QTimer, QMutex, pyqtSignal, QObject, QThread
 from PyQt5.QtGui import QFont, QPalette, QColor
 import matplotlib
 # 在导入其他matplotlib模块之前设置后端
@@ -16,10 +17,108 @@ from matplotlib.figure import Figure
 import numpy as np
 import re
 from collections import deque
+import subprocess
+import os
+import tempfile
 
 # 设置matplotlib使用支持中文的字体
 plt.rcParams['font.sans-serif'] = ['SimHei', 'Microsoft YaHei', 'DejaVu Sans']
 plt.rcParams['axes.unicode_minus'] = False
+
+# 固件刷写线程
+class FirmwareFlasher(QThread):
+    progress = pyqtSignal(int)
+    message = pyqtSignal(str)
+    finished = pyqtSignal(bool)
+    
+    def __init__(self, hex_file, port, avrdude_path=None):
+        super().__init__()
+        self.hex_file = hex_file
+        self.port = port
+        self.avrdude_path = avrdude_path or "./avrdude.exe"
+        self.is_cancelled = False
+        
+    def run(self):
+        try:
+            self.message.emit("Start flashing...")
+            
+            # 尝试复位 Arduino 进入 bootloader 模式
+            self.message.emit("Try to reset Arduino...")
+            try:
+                # 使用 1200 波特率打开串口复位（Arduino 标准方法）
+                reset_serial = serial.Serial(self.port, baudrate=1200)
+                reset_serial.close()
+                import time
+                time.sleep(4)  # 增加等待时间到 4 秒，确保完全进入 bootloader
+                self.message.emit("Reset signal sent...")
+            except Exception as reset_error:
+                self.message.emit(f"Reset failed: {str(reset_error)}")
+                
+            # 构建avrdude命令
+            cmd = [
+                self.avrdude_path,
+                "-C","avrdude.conf","-v",
+                "-p", "atmega2560",    # Arduino Mega 2560
+                "-c", "wiring",        # 编程器类型
+                "-P", self.port,       # 端口
+                "-b", "115200",        # 波特率
+                "-D",                  # 禁用自动擦除
+                "-U", f"flash:w:{self.hex_file}:i"  # 烧录操作
+            ]
+            
+            self.message.emit(f"Running command: {' '.join(cmd)}")
+            
+            # 执行刷写过程
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+            )
+            
+            # 读取输出并发送进度消息
+            output_lines = []
+            while True:
+                if self.is_cancelled:
+                    process.terminate()
+                    self.message.emit("Flashing canceled")
+                    self.finished.emit(False)
+                    return
+                    
+                line = process.stdout.readline()
+                if not line:
+                    break
+                    
+                output_lines.append(line.strip())
+                self.message.emit(line.strip())
+                
+                # 简单的进度模拟（实际中可以根据输出内容判断进度）
+                if "reading" in line.lower():
+                    self.progress.emit(25)
+                elif "writing" in line.lower():
+                    self.progress.emit(50)
+                elif "verifying" in line.lower():
+                    self.progress.emit(75)
+                elif "done" in line.lower() or "verified" in line.lower():
+                    self.progress.emit(100)
+            
+            # 等待进程结束
+            return_code = process.wait()
+            
+            if return_code == 0:
+                self.message.emit("Flash succeed")
+                self.finished.emit(True)
+            else:
+                self.message.emit(f"Flash failed, error code: {return_code}")
+                self.finished.emit(False)
+                
+        except Exception as e:
+            self.message.emit(f"Error: {str(e)}")
+            self.finished.emit(False)
+    
+    def cancel(self):
+        self.is_cancelled = True
 
 # 线程安全的数据处理器
 class DataProcessor(QObject):
@@ -105,7 +204,7 @@ class RealTimePlotWindow(QDialog):
     
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("实时传感器数据监控")
+        self.setWindowTitle("Monitor")
         self.setGeometry(200, 200, 1200, 800)
         
         # 数据缓冲区 - 保存最近的数据点，减少缓冲区大小
@@ -142,9 +241,9 @@ class RealTimePlotWindow(QDialog):
         
         # 控制按钮
         button_layout = QHBoxLayout()
-        self.clear_btn = QPushButton("清除数据")
+        self.clear_btn = QPushButton("Clear")
         self.clear_btn.clicked.connect(self.clear_data)
-        self.pause_btn = QPushButton("暂停/继续")
+        self.pause_btn = QPushButton("Continue/Pause")
         self.pause_btn.setCheckable(True)
         self.pause_btn.clicked.connect(self.toggle_pause)
         
@@ -165,47 +264,47 @@ class RealTimePlotWindow(QDialog):
         
     def setup_plots(self):
         # 设置PWM数据图
-        self.ax1.set_title('PWM输入输出')
-        self.ax1.set_xlabel('时间 (样本数)')
-        self.ax1.set_ylabel('PWM值')
+        self.ax1.set_title('PWM')
+        self.ax1.set_xlabel('time')
+        self.ax1.set_ylabel('PWM Value')
         self.ax1.grid(True, linestyle='--', alpha=0.7)
         self.ax1.set_ylim(1000, 2000)
         
         # 设置加速度数据图
-        self.ax2.set_title('加速度数据')
-        self.ax2.set_xlabel('时间 (样本数)')
-        self.ax2.set_ylabel('加速度 (g)')
+        self.ax2.set_title('Acceleration')
+        self.ax2.set_xlabel('time')
+        self.ax2.set_ylabel('Acceleration(g)')
         self.ax2.grid(True, linestyle='--', alpha=0.7)
         self.ax2.set_ylim(-2, 2)
         
         # 设置角速度数据图
-        self.ax3.set_title('角速度数据')
-        self.ax3.set_xlabel('时间 (样本数)')
-        self.ax3.set_ylabel('角速度 (dps)')
+        self.ax3.set_title('Angular Velocity')
+        self.ax3.set_xlabel('time')
+        self.ax3.set_ylabel('Angular Velocity (dps)')
         self.ax3.grid(True, linestyle='--', alpha=0.7)
         self.ax3.set_ylim(-200, 200)
         
         # 设置修正量数据图
-        self.ax4.set_title('修正量数据')
-        self.ax4.set_xlabel('时间 (样本数)')
-        self.ax4.set_ylabel('修正量')
+        self.ax4.set_title('compensation')
+        self.ax4.set_xlabel('time')
+        self.ax4.set_ylabel('compensation')
         self.ax4.grid(True, linestyle='--', alpha=0.7)
         self.ax4.set_ylim(-1, 1)
         
         # 创建初始空线条
-        self.line_steering, = self.ax1.plot([], [], 'r-', label='转向输入', linewidth=1)
-        self.line_gain, = self.ax1.plot([], [], 'g-', label='增益输入', linewidth=1)
-        self.line_servo, = self.ax1.plot([], [], 'b-', label='舵机输出', linewidth=1)
+        self.line_steering, = self.ax1.plot([], [], 'r-', label='Steering input', linewidth=1)
+        self.line_gain, = self.ax1.plot([], [], 'g-', label='Gain input', linewidth=1)
+        self.line_servo, = self.ax1.plot([], [], 'b-', label='Servo output', linewidth=1)
         self.ax1.legend(loc='upper right')
         
-        self.line_accel_x, = self.ax2.plot([], [], 'r-', label='加速度X', linewidth=1)
-        self.line_accel_y, = self.ax2.plot([], [], 'g-', label='加速度Y', linewidth=1)
+        self.line_accel_x, = self.ax2.plot([], [], 'r-', label='Acceleration X', linewidth=1)
+        self.line_accel_y, = self.ax2.plot([], [], 'g-', label='Acceleration Y', linewidth=1)
         self.ax2.legend(loc='upper right')
         
-        self.line_gyro, = self.ax3.plot([], [], 'b-', label='角速度Z', linewidth=1)
+        self.line_gyro, = self.ax3.plot([], [], 'b-', label='Angular Velocity Z', linewidth=1)
         self.ax3.legend(loc='upper right')
         
-        self.line_correction, = self.ax4.plot([], [], 'm-', label='修正量', linewidth=1)
+        self.line_correction, = self.ax4.plot([], [], 'm-', label='Compensation', linewidth=1)
         self.ax4.legend(loc='upper right')
         
         self.fig.tight_layout()
@@ -288,7 +387,7 @@ class RealTimePlotWindow(QDialog):
             self.canvas.draw_idle()
             
         except Exception as e:
-            print(f"绘图错误: {e}")
+            print(f"Plot error: {e}")
     
     def clear_data(self):
         """清除所有数据"""
@@ -305,10 +404,10 @@ class RealTimePlotWindow(QDialog):
         """切换暂停状态"""
         self.paused = not self.paused
         if self.paused:
-            self.pause_btn.setText("继续")
+            self.pause_btn.setText("Continue")
             self.plot_timer.stop()
         else:
-            self.pause_btn.setText("暂停")
+            self.pause_btn.setText("Pause")
             if not self.plot_timer.isActive():
                 self.plot_timer.start(self.plot_interval)
     
@@ -350,6 +449,10 @@ class MainWindow(QMainWindow):
         self.data_processor = DataProcessor()
         self.data_processor.data_ready.connect(self.handle_sensor_data)
         
+        # 固件刷写相关
+        self.flasher = None
+        self.flash_progress = None
+        
         self.setup_ui()
         self.setup_parameters()
         
@@ -376,8 +479,9 @@ class MainWindow(QMainWindow):
         self.port_combo = QComboBox()
         self.refresh_ports()
         
-        self.refresh_btn = QPushButton("Refresh Ports")
-        self.refresh_btn.clicked.connect(self.refresh_ports)
+        # 移除刷新按钮，添加刷写固件按钮
+        self.flash_btn = QPushButton("Flash Firmware")
+        self.flash_btn.clicked.connect(self.flash_firmware)
         
         self.connect_btn = QPushButton("Open Port")
         self.connect_btn.clicked.connect(self.toggle_connection)
@@ -386,12 +490,12 @@ class MainWindow(QMainWindow):
         self.report_btn.setCheckable(True)
         self.report_btn.clicked.connect(self.toggle_report)
         
-        self.plot_btn = QPushButton("打开实时图表")
+        self.plot_btn = QPushButton("Show Monitor")
         self.plot_btn.clicked.connect(self.toggle_plot_window)
         
         serial_layout.addWidget(QLabel("Port:"), 0, 0)
         serial_layout.addWidget(self.port_combo, 0, 1)
-        serial_layout.addWidget(self.refresh_btn, 0, 2)
+        serial_layout.addWidget(self.flash_btn, 0, 2)  # 替换刷新按钮为刷写按钮
         serial_layout.addWidget(self.connect_btn, 0, 3)
         serial_layout.addWidget(self.report_btn, 1, 0, 1, 2)
         serial_layout.addWidget(self.plot_btn, 1, 2, 1, 2)
@@ -490,23 +594,24 @@ class MainWindow(QMainWindow):
         # 参数定义 - 与Arduino代码中的参数对应
         self.parameters = [
             {"name": "BOARD_ROTATION", "min": 0, "max": 360, "default": 270, "decimals": 0},
-            {"name": "K_GAIN", "min": 0.001, "max": 0.02, "default": 0.0134, "decimals": 4},
+            {"name": "K_GAIN", "min": -0.02, "max": 0.02, "default": 0.003, "decimals": 4},
             {"name": "DEFAULT_GAIN", "min": 0, "max": 500, "default": 200, "decimals": 0},
-            {"name": "STEER_BY_ACC_RATE", "min": 0, "max": 20, "default": 1.5, "decimals": 1},
+            {"name": "STEER_BY_ACC_RATE", "min": 0, "max": 20, "default": 0.5, "decimals": 1},
             {"name": "COUNTER_STEER_RANGE", "min": 0, "max": 1.0, "default": 0.95, "decimals": 2},
             {"name": "SERVO_LIMIT_LEFT", "min": 0, "max": 1.0, "default": 1.0, "decimals": 2},
             {"name": "SERVO_LIMIT_RIGHT", "min": 0, "max": 1.0, "default": 1.0, "decimals": 2},
             {"name": "LOOP_FREQUENCY", "min": 50, "max": 1000, "default": 100, "decimals": 0},
             {"name": "IMU_FILTER", "min": 1, "max": 200, "default": 30, "decimals": 0},
-            {"name": "SERVO_FILTER", "min": 1, "max": 200, "default": 30, "decimals": 0},
-            {"name": "ANGACC_FILTER", "min": 1, "max": 200, "default": 20, "decimals": 0},
+            {"name": "SERVO_FILTER", "min": 1, "max": 200, "default": 120, "decimals": 0},
+            {"name": "ANGACC_FILTER", "min": 1, "max": 200, "default": 30, "decimals": 0},
             {"name": "STEER_BY_ANGACC_RATE", "min": 0, "max": 5, "default": 1, "decimals": 2},
             {"name": "GYRO_EXP", "min": -1, "max": 1, "default": -0.18, "decimals": 2},
             {"name": "OUTPUT_EXP", "min": -1, "max": 1, "default": 0, "decimals": 2},
-            {"name": "STEER_BY_ANGVEL_RATE", "min": 0, "max": 5, "default": 0.9, "decimals": 2},
-            {"name": "STEER_BY_ANG_RATE", "min": 0, "max": 5, "default": 1.55, "decimals": 2},
-            {"name": "STEER_BY_ANG_LIMIT", "min": 10, "max": 90, "default": 40.0, "decimals": 0},
-            {"name": "ANGVEL_ZERO", "min": -5, "max": 5, "default": 0.0, "decimals": 2}
+            {"name": "STEER_BY_ANGVEL_RATE", "min": 0, "max": 5, "default": 1.1, "decimals": 2},
+            {"name": "STEER_BY_ANG_RATE", "min": 0, "max": 5, "default": 1.0, "decimals": 2},
+            {"name": "STEER_BY_ANG_LIMIT", "min": 10, "max": 90, "default": 90.0, "decimals": 0},
+            {"name": "ANGVEL_ZERO", "min": -5, "max": 5, "default": 0.0, "decimals": 2},
+            {"name": "ANG_HALF_LIFE", "min": 0.001, "max": 2, "default": 0.15, "decimals": 2}
         ]
         
         # 创建参数控件
@@ -648,7 +753,7 @@ class MainWindow(QMainWindow):
                         self.receive_buffer += f"[HEX] {hex_text} "
             except Exception as e:
                 # 忽略读取错误，避免频繁的错误报告
-                print(f"串口读取错误: {e}")
+                print(f"Error reading serial: {e}")
     
     def parse_sensor_data(self, text):
         """解析传感器数据并发送到数据处理器"""
@@ -691,7 +796,7 @@ class MainWindow(QMainWindow):
                     self.data_processor.add_data(data_dict)
                     
             except Exception as e:
-                print(f"数据解析错误: {e}")
+                print(f"Error reading data: {e}")
     
     def handle_sensor_data(self, data_dict):
         """处理从数据处理器接收到的传感器数据"""
@@ -734,19 +839,105 @@ class MainWindow(QMainWindow):
             # 连接关闭信号
             self.plot_window.closed.connect(self.on_plot_window_closed)
             self.plot_window.show()
-            self.plot_btn.setText("关闭实时图表")
+            self.plot_btn.setText("Close Monitor")
         else:
             if self.plot_window.isVisible():
                 self.plot_window.hide()
-                self.plot_btn.setText("打开实时图表")
+                self.plot_btn.setText("Show Monitor")
             else:
                 self.plot_window.show()
-                self.plot_btn.setText("关闭实时图表")
+                self.plot_btn.setText("Close Monitor")
     
     def on_plot_window_closed(self):
         """处理绘图窗口关闭事件"""
-        self.plot_btn.setText("打开实时图表")
+        self.plot_btn.setText("Show Monitor")
         # 注意：我们不需要将 plot_window 设置为 None，因为对话框仍然存在，只是隐藏了
+    
+    def flash_firmware(self):
+        """刷写固件功能"""
+        if not self.port_combo.count():
+            QMessageBox.warning(self, "Warning", "No serial port available!")
+            return
+            
+        # 选择hex文件
+        hex_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select HEX Firmware File",
+            "",
+            "HEX Files (*.hex);;All Files (*)"
+        )
+        
+        if not hex_file:
+            return
+            
+        # 检查文件是否存在
+        if not os.path.exists(hex_file):
+            QMessageBox.critical(self, "Error", f"HEX file not found: {hex_file}")
+            return
+            
+        # 获取选择的端口
+        port = self.port_combo.currentText()
+        
+        # 确认刷写
+        reply = QMessageBox.question(
+            self,
+            "Confirm Flash",
+            f"Are you sure you want to flash firmware to {port}?\n\n"
+            f"File: {os.path.basename(hex_file)}\n"
+            f"Port: {port}\n\n"
+            "This will erase the current firmware!",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        
+        if reply != QMessageBox.Yes:
+            return
+            
+        # 关闭串口连接
+        if self.serial_port and self.serial_port.is_open:
+            self.close_serial()
+            
+        # 创建进度对话框
+        self.flash_progress = QProgressDialog("Flashing firmware...", "Cancel", 0, 100, self)
+        self.flash_progress.setWindowTitle("Firmware Flash")
+        self.flash_progress.setWindowModality(Qt.WindowModal)
+        self.flash_progress.setAutoClose(False)
+        self.flash_progress.setAutoReset(False)
+        
+        # 创建刷写线程
+        self.flasher = FirmwareFlasher(hex_file, port)
+        self.flasher.progress.connect(self.flash_progress.setValue)
+        self.flasher.message.connect(self.on_flash_message)
+        self.flasher.finished.connect(self.on_flash_finished)
+        
+        # 连接取消按钮
+        self.flash_progress.canceled.connect(self.flasher.cancel)
+        
+        # 禁用刷写按钮
+        self.flash_btn.setEnabled(False)
+        
+        # 显示进度对话框并开始刷写
+        self.flash_progress.show()
+        self.flasher.start()
+        
+    def on_flash_message(self, message):
+        """处理刷写过程中的消息"""
+        self.console.append(f"[FLASH] {message}")
+        
+    def on_flash_finished(self, success):
+        """刷写完成处理"""
+        # 启用刷写按钮
+        self.flash_btn.setEnabled(True)
+        
+        # 关闭进度对话框
+        if self.flash_progress:
+            self.flash_progress.close()
+            self.flash_progress = None
+            
+        if success:
+            QMessageBox.information(self, "Success", "Firmware flash completed successfully!")
+        else:
+            QMessageBox.warning(self, "Warning", "Firmware flash failed. Check console for details.")
             
     def send_command(self, command):
         if not self.serial_port or not self.serial_port.is_open:
@@ -819,7 +1010,7 @@ class MainWindow(QMainWindow):
                             self.param_request_count = 0
                             self.console.append("\nAll parameters loaded successfully")
             except Exception as e:
-                print(f"参数解析错误: {e}")
+                print(f"Failed to read parameters: {e}")
                         
     def update_slider_from_param(self, param_name, value):
         if param_name not in self.sliders:
@@ -895,6 +1086,10 @@ class MainWindow(QMainWindow):
         self.data_timer.stop()
         self.display_timer.stop()
         self.port_timer.stop()
+        # 如果正在刷写固件，取消刷写
+        if self.flasher and self.flasher.isRunning():
+            self.flasher.cancel()
+            self.flasher.wait(2000)  # 等待2秒让线程结束
         event.accept()
 
 if __name__ == "__main__":
@@ -910,4 +1105,6 @@ if __name__ == "__main__":
     try:
         sys.exit(app.exec_())
     except Exception as e:
-        print(f"应用程序错误: {e}")
+        print(f"Error: {e}")
+        
+# pyinstaller -F -w ardudrift_tuner.py

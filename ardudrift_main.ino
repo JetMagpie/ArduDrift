@@ -1,11 +1,13 @@
-#include "MPU6000.h"
-#include "UART.h"
-#include "PWMOutput.h"
-#include "EEPROM_Manager.h"
+#include "LSM6DS3.h"
+#include "Wire.h"
 #include <math.h>
 #include <string.h>
+#include <nrfx_pwm.h>
+#include <hal/nrf_gpio.h>
 
-// 参数结构体 - 用于EEPROM存储
+#include <nrf_nvmc.h> 
+
+// 参数结构体
 struct SystemParams {
     float BOARD_ROTATION;
     float K_GAIN;
@@ -49,8 +51,6 @@ struct SystemParams {
 #define DEFAULT_ANGVEL_ZERO 0.0
 #define DEFAULT_ANG_HALF_LIFE 0.15
 
-// EEPROM管理器
-EEPROM_Manager eeprom(0);
 SystemParams current_params;
 
 // 全局变量
@@ -58,29 +58,44 @@ volatile bool report_enabled = false;
 char serial_buffer[64];
 uint8_t serial_index = 0;
 
-// 使用提供的库实例
-extern UART uart;
-MPU6000 mpu;
+// 创建LSM6DS3实例
+LSM6DS3 imu(I2C_MODE, 0x6A);
 
-// 使用输出1通道 (CH1) - 引脚12
-#define SERVO_OUT_CHANNEL PWMOutput::CH1
+//imu去毛刺
+#define MEDIAN_WINDOW 3
+float gyro_buffer[MEDIAN_WINDOW];
+uint8_t gyro_idx = 0;
 
-// 引脚和pwm信号设定
-#define STEERING_IN_PIN 2
-#define GAIN_IN_PIN 3
+// nRF52840引脚定义
+#define STEERING_IN_PIN 4    // P0.04
+#define GAIN_IN_PIN 5        // P0.05
+#define SERVO_OUT_PIN 3      // P0.03
+
+// PWM信号设定
 #define PWM_MIN 800
-#define PWM_MAX 2200//限位现在扩展到800到2200
+#define PWM_MAX 2200
 #define PWM_NEUTRAL 1500
 #define INPUT_TIMEOUT_MS 500
 
-// 全局变量
-volatile uint32_t steering_start = 0;
-volatile uint32_t gain_start = 0;
-volatile uint16_t steering_pwm = PWM_NEUTRAL;
-volatile uint16_t gain_pwm = PWM_NEUTRAL;
-volatile uint32_t steering_last_update = 0;
-volatile uint32_t gain_last_update = 0;
-float angular_accel_integral = 0.0;
+// PWM输出频率设置
+#define PWM_FREQUENCY 100
+#define PWM_CLOCK_FREQ 1000000
+#define PWM_RESOLUTION 32768
+
+// 硬件定时器用于精确时间测量
+#define TIMER_PRESCALER 4  // 16MHz / 2^4 = 1MHz (1µs分辨率)
+static volatile uint32_t timer_overflow_count = 0;
+
+#define FLASH_START_ADDR 0x3E000  // 可用闪存末尾区域
+
+// nRF52840 PWM输出实例
+static nrfx_pwm_t m_pwm0 = NRFX_PWM_INSTANCE(0);
+static nrf_pwm_values_individual_t m_seq_values;
+static nrf_pwm_sequence_t m_seq;
+static uint16_t m_pwm_period;
+
+// 舵机输出值记录
+static uint16_t last_servo_output = PWM_NEUTRAL;
 
 // 参数验证范围结构
 struct ParamRange {
@@ -93,22 +108,22 @@ const ParamRange param_ranges[] = {
     {0, 360},       // BOARD_ROTATION
     {-0.1, 0.1},   // K_GAIN
     {0, 500},      // DEFAULT_GAIN
-    {0, 20},      // STEER_BY_ACC_RATE
-    {0, 1.0},     // COUNTER_STEER_RANGE
-    {0, 1.0},     // SERVO_LIMIT_LEFT
-    {0, 1.0},     // SERVO_LIMIT_RIGHT
-    {50, 1000},     // LOOP_FREQUENCY
-    {1, 500},        // IMU_FILTER
-    {1, 500},        // SERVO_FILTER
-    {1, 500},        // ANGACC_FILTER
-    {0, 10},        // STEER_BY_ANGACC_RATE
-    {-1, 1},        // GYRO_EXP
-    {-1, 1},         // OUTPUT_EXP
-    {0, 20},        // STEER_BY_ANGVEL_RATE
-    {0, 20},        // STEER_BY_ANG_RATE
+    {0, 20},       // STEER_BY_ACC_RATE
+    {0, 1.0},      // COUNTER_STEER_RANGE
+    {0, 1.0},      // SERVO_LIMIT_LEFT
+    {0, 1.0},      // SERVO_LIMIT_RIGHT
+    {50, 1000},    // LOOP_FREQUENCY
+    {1, 500},      // IMU_FILTER
+    {1, 500},      // SERVO_FILTER
+    {1, 500},      // ANGACC_FILTER
+    {0, 10},       // STEER_BY_ANGACC_RATE
+    {-1, 1},       // GYRO_EXP
+    {-1, 1},       // OUTPUT_EXP
+    {0, 20},       // STEER_BY_ANGVEL_RATE
+    {0, 20},       // STEER_BY_ANG_RATE
     {10, 90},      // STEER_BY_ANG_LIMIT
-    {-20, 20},       // ANGVEL_ZERO
-    {0.001,2}        // ANG_HALF_LIFE
+    {-20, 20},     // ANGVEL_ZERO
+    {0.001,2}      // ANG_HALF_LIFE
 };
 
 // 参数名称数组
@@ -176,43 +191,32 @@ struct KinematicState {
   float total_accel, accel_direction;
 };
 
-// 坐标旋转函数 - 根据飞控板安装方向调整传感器数据
+// 坐标旋转函数
 void rotateSensorData(float &accel_x, float &accel_y, float &gyro_z, int rotation_deg) {
-  // 规范化角度到0-359度范围
   rotation_deg = rotation_deg % 360;
   if (rotation_deg < 0) {
     rotation_deg += 360;
   }
   
-  // 如果角度是0度，无需旋转
   if (rotation_deg == 0) {
     return;
   }
   
-  // 将角度转换为弧度
   float theta = rotation_deg * M_PI / 180.0;
-  
-  // 计算旋转矩阵（2D平面旋转）
   float cos_theta = cos(theta);
   float sin_theta = sin(theta);
   
-  // 应用旋转矩阵到加速度数据
   float temp_accel_x = accel_x * cos_theta - accel_y * sin_theta;
   float temp_accel_y = accel_x * sin_theta + accel_y * cos_theta;
   
-  // 更新加速度值
   accel_x = temp_accel_x;
   accel_y = temp_accel_y;
-  
-  // 注意：角速度方向不变（绕Z轴旋转）
-  // gyro_z保持不变
 }
 
 // S型曲线处理函数
 float applySCurve(float input, float exp_param, bool use_limits = false, float limit_positive = 1.0, float limit_negative = 1.0) {
-    if (fabs(input) < 0.001f) return 0.0f; // 处理零输入
+    if (fabs(input) < 0.001f) return 0.0f;
     
-    // 当a接近0时，使用线性函数
     if (fabs(exp_param) < 0.001f) {
         float result = input;
         if (use_limits) {
@@ -228,19 +232,12 @@ float applySCurve(float input, float exp_param, bool use_limits = false, float l
     float abs_x = fabs(input);
     float sign_x = (input > 0) ? 1.0f : -1.0f;
     
-    // 计算100^a
     float base_pow_a = pow(100.0f, exp_param);
-    
-    // 计算分子部分：((100^a)^(|x|) / (100^a)) - (1/(100^a))
     float numerator = (pow(base_pow_a, abs_x) / base_pow_a) - (1.0f / base_pow_a);
-    
-    // 计算分母部分：1 - (1/(100^a))
     float denominator = 1.0f - (1.0f / base_pow_a);
     
-    // 最终结果
     float result = sign_x * (numerator / denominator);
     
-    // 应用边界限制
     if (use_limits) {
         if (input > 0) {
             result *= limit_positive;
@@ -252,130 +249,212 @@ float applySCurve(float input, float exp_param, bool use_limits = false, float l
     return result;
 }
 
-// PWM输入中断服务函数（保持不变）
-void steeringISR() {
-  if (digitalRead(STEERING_IN_PIN)) {
-    steering_start = micros();
-  } else {
-    uint32_t pulse_width = micros() - steering_start;
-    if (pulse_width >= PWM_MIN && pulse_width <= PWM_MAX) {
-      steering_pwm = pulse_width;
-      steering_last_update = millis();
+//去毛刺函数
+float median_filter(float input) {
+    gyro_buffer[gyro_idx] = input;
+    gyro_idx = (gyro_idx + 1) % MEDIAN_WINDOW;
+    
+    // 复制并排序（简单冒泡）
+    float sorted[MEDIAN_WINDOW];
+    memcpy(sorted, gyro_buffer, sizeof(sorted));
+    for (int i = 0; i < MEDIAN_WINDOW-1; i++) {
+        for (int j = i+1; j < MEDIAN_WINDOW; j++) {
+            if (sorted[i] > sorted[j]) {
+                float tmp = sorted[i];
+                sorted[i] = sorted[j];
+                sorted[j] = tmp;
+            }
+        }
     }
-  }
+    return sorted[MEDIAN_WINDOW/2];
 }
 
-void gainISR() {
-  if (digitalRead(GAIN_IN_PIN)) {
-    gain_start = micros();
-  } else {
-    uint32_t pulse_width = micros() - gain_start;
-    if (pulse_width >= PWM_MIN && pulse_width <= PWM_MAX) {
-      gain_pwm = pulse_width;
-      gain_last_update = millis();
-    }
-  }
+//PWM 输入捕获
+//Steering
+volatile uint16_t steering_pulse_width_us = PWM_NEUTRAL;
+volatile uint32_t steering_last_capture_time = 0;
+
+//Gain
+volatile uint16_t gain_pulse_width_us = PWM_NEUTRAL;
+volatile uint32_t gain_last_capture_time = 0;
+
+//TIMER 初始化
+static void timer_init(NRF_TIMER_Type *timer)
+{
+    timer->MODE      = TIMER_MODE_MODE_Timer;
+    timer->PRESCALER = 4;                 // 1 MHz
+    timer->BITMODE   = TIMER_BITMODE_BITMODE_32Bit;
+    timer->TASKS_CLEAR = 1;
+    timer->TASKS_START = 1;
 }
 
+//初始化 PWM 捕获
+bool initPWMCapture()
+{
+    pinMode(STEERING_IN_PIN, INPUT_PULLDOWN);
+    pinMode(GAIN_IN_PIN, INPUT_PULLDOWN);
+
+    //初始化 TIMER2（用于两路捕获）
+    timer_init(NRF_TIMER2);   // 1MHz, 32位
+
+    //GPIOTE 配置
+    NRF_GPIOTE->CONFIG[0] =
+        (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+        (STEERING_IN_PIN << GPIOTE_CONFIG_PSEL_Pos) |
+        (GPIOTE_CONFIG_POLARITY_LoToHi << GPIOTE_CONFIG_POLARITY_Pos);
+
+    NRF_GPIOTE->CONFIG[1] =
+        (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+        (STEERING_IN_PIN << GPIOTE_CONFIG_PSEL_Pos) |
+        (GPIOTE_CONFIG_POLARITY_HiToLo << GPIOTE_CONFIG_POLARITY_Pos);
+
+    NRF_GPIOTE->CONFIG[2] =
+        (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+        (GAIN_IN_PIN << GPIOTE_CONFIG_PSEL_Pos) |
+        (GPIOTE_CONFIG_POLARITY_LoToHi << GPIOTE_CONFIG_POLARITY_Pos);
+
+    NRF_GPIOTE->CONFIG[3] =
+        (GPIOTE_CONFIG_MODE_Event << GPIOTE_CONFIG_MODE_Pos) |
+        (GAIN_IN_PIN << GPIOTE_CONFIG_PSEL_Pos) |
+        (GPIOTE_CONFIG_POLARITY_HiToLo << GPIOTE_CONFIG_POLARITY_Pos);
+
+    //PPI指向 TIMER2
+    NRF_PPI->CH[0].EEP = (uint32_t)&NRF_GPIOTE->EVENTS_IN[0];
+    NRF_PPI->CH[0].TEP = (uint32_t)&NRF_TIMER2->TASKS_CAPTURE[0];   // STEERING 上升沿
+
+    NRF_PPI->CH[1].EEP = (uint32_t)&NRF_GPIOTE->EVENTS_IN[1];
+    NRF_PPI->CH[1].TEP = (uint32_t)&NRF_TIMER2->TASKS_CAPTURE[1];   // STEERING 下降沿
+
+    NRF_PPI->CH[2].EEP = (uint32_t)&NRF_GPIOTE->EVENTS_IN[2];
+    NRF_PPI->CH[2].TEP = (uint32_t)&NRF_TIMER2->TASKS_CAPTURE[2];   // GAIN 上升沿
+
+    NRF_PPI->CH[3].EEP = (uint32_t)&NRF_GPIOTE->EVENTS_IN[3];
+    NRF_PPI->CH[3].TEP = (uint32_t)&NRF_TIMER2->TASKS_CAPTURE[3];   // GAIN 下降沿
+
+    // 使能 PPI 通道 0~3
+    NRF_PPI->CHENSET = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3);
+
+    Serial.println("PWM capture initialized");
+    return true;
+}
+
+//PWM 读取
+uint16_t getSteeringPWM()
+{
+    uint32_t rise = NRF_TIMER2->CC[2];
+    uint32_t fall = NRF_TIMER2->CC[3];
+
+    if (fall > rise) {  // 有效脉冲
+        uint32_t pw = fall - rise;
+        if (pw >= PWM_MIN && pw <= PWM_MAX) {
+            steering_pulse_width_us = pw;
+            steering_last_capture_time = millis();
+        }
+    }
+    return steering_pulse_width_us;
+}
+
+uint16_t getGainPWM() {
+    uint32_t rise = NRF_TIMER2->CC[0];
+    uint32_t fall = NRF_TIMER2->CC[1];
+
+    if (fall > rise) {
+        uint32_t pw = fall - rise;
+        if (pw >= PWM_MIN && pw <= PWM_MAX) {
+            gain_pulse_width_us = pw;
+            gain_last_capture_time = millis();
+        }
+    }
+    return gain_pulse_width_us;
+}
+
+
+// 检查输入超时
 void checkInputTimeout() {
-  uint32_t current_time = millis();
-  if (current_time - steering_last_update > INPUT_TIMEOUT_MS) {
-    steering_pwm = PWM_NEUTRAL;
-  }
-  if (current_time - gain_last_update > INPUT_TIMEOUT_MS) {
-    gain_pwm = PWM_NEUTRAL + current_params.DEFAULT_GAIN;
-  }
+    uint32_t current_time = millis();
+    if (current_time - steering_last_capture_time > INPUT_TIMEOUT_MS) {
+        steering_pulse_width_us = PWM_NEUTRAL;
+    }
+    if (current_time - gain_last_capture_time > INPUT_TIMEOUT_MS) {
+        gain_pulse_width_us = PWM_NEUTRAL + current_params.DEFAULT_GAIN;
+    }
 }
 
 // 应用传感器滤波器
 void applySensorFilters(float accel_x_raw, float accel_y_raw, float gyro_z_raw, 
                        float &accel_x_filt, float &accel_y_filt, float &gyro_z_filt) {
-  accel_x_filt = accel_x_filter.update(accel_x_raw);
-  accel_y_filt = accel_y_filter.update(accel_y_raw);
-  gyro_z_filt = gyro_z_filter.update(gyro_z_raw);
+    accel_x_filt = accel_x_filter.update(accel_x_raw);
+    accel_y_filt = accel_y_filter.update(accel_y_raw);
+    gyro_z_filt = gyro_z_filter.update(gyro_z_raw);
 }
 
-// 计算运动学状态 - 添加旋转角度参数
+// 计算运动学状态
 void calculateKinematicState(float accel_x, float accel_y, float angular_vel, 
                             KinematicState &state, int rotation_deg = 0) {
-  // 首先根据安装方向旋转传感器数据
-  rotateSensorData(accel_x, accel_y, angular_vel, rotation_deg);
-  
-  // 存储旋转后的数据
-  state.accel_x = accel_x;
-  state.accel_y = accel_y;
-  state.angular_vel = angular_vel;
-  
-  state.total_accel = sqrt(accel_x * accel_x + accel_y * accel_y);
-  state.accel_direction = atan2(accel_y, accel_x) * 180.0 / M_PI;
-  
-  float angular_vel_rad = fabs(angular_vel) * M_PI / 180.0;
-  float total_accel_ms2 = state.total_accel * 9.81;
+    rotateSensorData(accel_x, accel_y, angular_vel, rotation_deg);
+    
+    state.accel_x = accel_x;
+    state.accel_y = accel_y;
+    state.angular_vel = angular_vel;
+    
+    state.total_accel = sqrt(accel_x * accel_x + accel_y * accel_y);
+    state.accel_direction = atan2(accel_y, accel_x) * 180.0 / M_PI;
+    
+    float angular_vel_rad = fabs(angular_vel) * M_PI / 180.0;
+    float total_accel_ms2 = state.total_accel * 9.81;
 }
 
-// 修改后的反打控制函数
+// 反打控制函数
 float calculateCounterSteerByKinematics(const KinematicState &state, float gain) {
-    // 参数定义
-    const float ACCEL_GAIN = 10*current_params.STEER_BY_ACC_RATE;     // 横向加速度增益系数
-    const float GYRO_GAIN = current_params.STEER_BY_ANGVEL_RATE;   // 角速度增益系数 - 改为可调参数
-    const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE; // 角加速度增益系数
+    const float ACCEL_GAIN = 10*current_params.STEER_BY_ACC_RATE;
+    const float GYRO_GAIN = current_params.STEER_BY_ANGVEL_RATE;
+    const float ANGACC_GAIN = current_params.STEER_BY_ANGACC_RATE;
     const float REDUCTION = pow(2.0, -1.0 / (current_params.LOOP_FREQUENCY*current_params.ANG_HALF_LIFE));
-    const float DEADBAND_ACCEL = 0.2f; // 加速度死区 (g)
-    const float DEADBAND_GYRO = 0.8f;  // 角速度死区 (度/秒)
-    const uint32_t DEADBAND_TIMEOUT_MS = 250; // 角速度死区超时时间(ms)
+    const float DEADBAND_ACCEL = 0.2f;
+    const float DEADBAND_GYRO = 0.8f;
+    const uint32_t DEADBAND_TIMEOUT_MS = 250;
     
-    static float angle_integral = 0.0f; // 角度积分器
-    static uint32_t last_gyro_active_time = 0; // 上次角速度活跃时间
-    static bool first_run = true; // 首次运行标志
+    static float angle_integral = 0.0f;
+    static uint32_t last_gyro_active_time = 0;
+    static bool first_run = true;
+    static float angular_accel_integral = 0.0f;
     
     float counter_steer = 0.0f;
-    
-    // 获取当前时间
     uint32_t current_time = millis();
     
-    // 初始化时间戳
     if (first_run) {
         last_gyro_active_time = current_time;
         first_run = false;
     }
     
-    // 应用角速度零偏校准
     float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
     
-    //基于角速度的反打分量
     if (fabs(calibrated_angular_vel) > DEADBAND_GYRO) {
-        // 更新角速度活跃时间
         last_gyro_active_time = current_time;
         
-        // 角速度与反打方向相同
         float gyro_component = calibrated_angular_vel * GYRO_GAIN;
         counter_steer += gyro_component;
         
-        //基于角加速度的反打预测
         float angacc_component = current_params.ANGACC_FILTER * (calibrated_angular_vel - angular_accel_integral);
         angular_accel_integral += angacc_component;
         angacc_component *= ANGACC_GAIN / current_params.LOOP_FREQUENCY;
 
-        // 角度积分项 - 只在未达到饱和限制时积分
         float angle_increment = calibrated_angular_vel;
-        if (fabs(state.accel_x) > DEADBAND_ACCEL) {//基于横向加速度的反打修正量
+        if (fabs(state.accel_x) > DEADBAND_ACCEL) {
             float accel_component = state.accel_x * ACCEL_GAIN;
             angle_increment -= accel_component;
-        }//角加速度维持轨迹方向，横向加速度修正轨迹方向
-
-        // 检查积分饱和限制
-        if (fabs(angle_integral + angle_increment) <= current_params.STEER_BY_ANG_LIMIT*current_params.LOOP_FREQUENCY) {
-            angle_integral += angle_increment;
-            angle_integral *= REDUCTION;//角度衰减
         }
 
-        //去除循环周期影响
+        if (fabs(angle_integral + angle_increment) <= current_params.STEER_BY_ANG_LIMIT*current_params.LOOP_FREQUENCY) {
+            angle_integral += angle_increment;
+            angle_integral *= REDUCTION;
+        }
+
         float real_angle = angle_integral/ current_params.LOOP_FREQUENCY;
         float angle_component = real_angle * current_params.STEER_BY_ANG_RATE;
         counter_steer += angle_component;
     }
     else {
-        // 角速度在死区内，检查是否需要清零积分器
         if (current_time - last_gyro_active_time > DEADBAND_TIMEOUT_MS) {
             angle_integral *= REDUCTION;
         }
@@ -383,18 +462,15 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
         float angle_component = real_angle * current_params.STEER_BY_ANG_RATE;
         counter_steer += angle_component;
     }
-    //应用感度调节
+    
     counter_steer *= gain * current_params.K_GAIN;
     
-    // 应用陀螺仪输出的S型曲线
     if (fabs(current_params.GYRO_EXP) > 0.001f) {
-        // 归一化到[-1,1]范围进行处理
         float normalized_steer = counter_steer / current_params.COUNTER_STEER_RANGE;
         normalized_steer = applySCurve(normalized_steer, current_params.GYRO_EXP);
         counter_steer = normalized_steer * current_params.COUNTER_STEER_RANGE;
     }
     
-    //限制输出范围
     counter_steer = constrain(counter_steer, -current_params.COUNTER_STEER_RANGE, current_params.COUNTER_STEER_RANGE);
     
     return counter_steer;
@@ -402,15 +478,60 @@ float calculateCounterSteerByKinematics(const KinematicState &state, float gain)
 
 // 计算感度系数
 float calculateGain() {
-  if (gain_pwm < PWM_MIN || gain_pwm > PWM_MAX) {
-    return 0.5;
-  }
-  float normalized = (float)(gain_pwm - 1500) / 500.0;
-  normalized = constrain(normalized, 0.0, 1.0);
-  return normalized;
+    uint16_t gain_pwm = getGainPWM();
+    if (gain_pwm < PWM_MIN || gain_pwm > PWM_MAX) {
+        return 0.5;
+    }
+    float normalized = (float)(gain_pwm - 1500) / 500.0;
+    normalized = constrain(normalized, 0.0, 1.0);
+    return normalized;
 }
 
-// 输出到舵机 - 使用CH1通道
+// 初始化nRF52840的硬件PWM输出
+bool initPWMOutput() {
+    m_pwm_period = PWM_CLOCK_FREQ / PWM_FREQUENCY;   // 10000
+
+    nrfx_pwm_config_t config = NRFX_PWM_DEFAULT_CONFIG;
+    config.output_pins[0] = SERVO_OUT_PIN;
+    config.base_clock = NRF_PWM_CLK_1MHz;
+    config.top_value = m_pwm_period;
+    config.load_mode = NRF_PWM_LOAD_INDIVIDUAL;
+    config.step_mode = NRF_PWM_STEP_AUTO;
+
+    if (nrfx_pwm_init(&m_pwm0, &config, NULL) != NRFX_SUCCESS) {
+        Serial.println("PWM init failed");
+        return false;
+    }
+
+    m_seq_values.channel_0 = PWM_NEUTRAL;
+    m_seq_values.channel_1 = 0;
+    m_seq_values.channel_2 = 0;
+    m_seq_values.channel_3 = 0;
+
+    m_seq.values.p_individual = &m_seq_values;
+    m_seq.length = NRF_PWM_VALUES_LENGTH(m_seq_values);
+    m_seq.repeats = 0;
+    m_seq.end_delay = 0;
+
+    // 只启动一次
+    nrfx_pwm_simple_playback(&m_pwm0, &m_seq, 1, NRFX_PWM_FLAG_LOOP);
+
+    Serial.println("PWM output initialized at 100Hz");
+    return true;
+}
+
+
+// 设置PWM脉宽（微秒）
+void setPulseWidth(uint16_t pulse_us) {
+    pulse_us = constrain(pulse_us, PWM_MIN, PWM_MAX);
+
+    // 1us = 1 tick（1MHz clock）
+    m_seq_values.channel_0 = m_pwm_period - pulse_us;
+
+    last_servo_output = pulse_us;
+}
+
+// 输出到舵机
 void outputServo(float steering_input, float correction) {
     if (steering_input < PWM_MIN || steering_input > PWM_MAX) {
         steering_input = PWM_NEUTRAL;
@@ -419,12 +540,10 @@ void outputServo(float steering_input, float correction) {
     float normalized_input = (steering_input - 1500) / 500.0;
     float final_output = normalized_input + correction;
     
-    // 应用舵机输出的S型曲线
     if (fabs(current_params.OUTPUT_EXP) > 0.001f) {
         final_output = applySCurve(final_output, current_params.OUTPUT_EXP, true, 
                                  current_params.SERVO_LIMIT_RIGHT, current_params.SERVO_LIMIT_LEFT);
     } else {
-        // 如果没有S曲线，使用线性限制
         final_output = constrain(final_output, -current_params.SERVO_LIMIT_LEFT, current_params.SERVO_LIMIT_RIGHT);
     }
     
@@ -434,55 +553,56 @@ void outputServo(float steering_input, float correction) {
     float normalized_filtered = servo_filter.update((pwm_output_raw - 1500) / 500.0);
     uint16_t filtered_pwm = PWM_NEUTRAL + (int)(normalized_filtered * 500);
     
-    // 使用CH1通道输出
-    PWMOutput::setPulse(SERVO_OUT_CHANNEL, filtered_pwm);
+    setPulseWidth(filtered_pwm);
 }
 
 // 精确循环频率控制
 void controlLoopFrequency() {
-  static uint32_t last_loop_time = 0;
-  uint32_t current_time = micros();
-  
-  if (last_loop_time > 0) {
-    uint32_t loop_duration = current_time - last_loop_time;
-    uint32_t target_loop_time = 1000000 / current_params.LOOP_FREQUENCY;
-    if (loop_duration < target_loop_time) {
-      delayMicroseconds(target_loop_time - loop_duration);
+    static uint32_t last_loop_time = 0;
+    uint32_t current_time = micros();
+    
+    if (last_loop_time > 0) {
+        uint32_t loop_duration = current_time - last_loop_time;
+        uint32_t target_loop_time = 1000000 / current_params.LOOP_FREQUENCY;
+        if (loop_duration < target_loop_time) {
+            delayMicroseconds(target_loop_time - loop_duration);
+        }
     }
-  }
-  last_loop_time = micros();
+    last_loop_time = micros();
 }
 
 // 实时数据监控
 void printKinematicData(const KinematicState &state, float correction) {
-  if (!report_enabled) return;
-  
-  float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
-  
-  uart.print("IN_STEER:");
-  uart.print((int)steering_pwm);
-  uart.print(" IN_GAIN:");
-  uart.print((int)gain_pwm);
-  uart.print(" OUT_SERVO:");
-  uart.print((int)PWMOutput::read(SERVO_OUT_CHANNEL));
-  
-  uart.print(" | Accel:(");
-  uart.print(state.accel_x, 2);
-  uart.print(",");
-  uart.print(state.accel_y, 2);
-  uart.print(")g");
-  
-  uart.print(" | ω:");
-  uart.print(calibrated_angular_vel, 1);
-  uart.print("dps");
-  
-  uart.print(" | Correction:");
-  uart.print(correction, 3);
-  
-  uart.println();
+    if (!report_enabled) return;
+    
+    uint16_t steering_pwm = getSteeringPWM();
+    uint16_t gain_pwm = getGainPWM();
+    float calibrated_angular_vel = state.angular_vel + current_params.ANGVEL_ZERO;
+    
+    Serial.print("IN_STEER:");
+    Serial.print((int)steering_pwm);
+    Serial.print(" IN_GAIN:");
+    Serial.print((int)gain_pwm);
+    Serial.print(" OUT_SERVO:");
+    Serial.print((int)last_servo_output);
+    
+    Serial.print(" | Accel:(");
+    Serial.print(state.accel_x, 2);
+    Serial.print(",");
+    Serial.print(state.accel_y, 2);
+    Serial.print(")g");
+    
+    Serial.print(" | ω:");
+    Serial.print(calibrated_angular_vel, 1);
+    Serial.print("dps");
+    
+    Serial.print(" | Correction:");
+    Serial.print(correction, 3);
+    
+    Serial.println();
 }
 
-// EEPROM相关函数
+// 参数读写相关函数
 void initializeDefaultParams() {
     current_params.BOARD_ROTATION = DEFAULT_BOARD_ROTATION;
     current_params.K_GAIN = DEFAULT_K_GAIN;
@@ -502,56 +622,78 @@ void initializeDefaultParams() {
     current_params.STEER_BY_ANG_RATE = DEFAULT_STEER_BY_ANG_RATE;
     current_params.STEER_BY_ANG_LIMIT = DEFAULT_STEER_BY_ANG_LIMIT;
     current_params.ANGVEL_ZERO = DEFAULT_ANGVEL_ZERO;
+    current_params.ANG_HALF_LIFE = DEFAULT_ANG_HALF_LIFE;
 }
 
 bool validateParamRange(uint8_t param_index, float value) {
     if (param_index >= sizeof(param_ranges)/sizeof(ParamRange)) return false;
-    
     ParamRange range = param_ranges[param_index];
     return (value >= range.min && value <= range.max);
 }
 
-void loadParamsFromEEPROM() {
+void saveParamsToFlash() {
+    uint32_t* src = (uint32_t*)&current_params;
+    uint32_t* dst = (uint32_t*)FLASH_START_ADDR;
+    size_t words = sizeof(SystemParams)/4;
+
+    //擦除页
+    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Een;
+    nrf_nvmc_page_erase(FLASH_START_ADDR);
+    while (NRF_NVMC->READY == 0) {}
+
+    //写入数据
+    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Wen;
+    for (size_t i = 0; i < words; i++) {
+        nrf_nvmc_write_word((uint32_t)&dst[i], src[i]);
+        while (NRF_NVMC->READY == 0) {} // 等待写入完成
+    }
+
+    //回到只读模式
+    NRF_NVMC->CONFIG = NVMC_CONFIG_WEN_Ren;
+
+    Serial.println("Parameters saved to Flash");
+}
+
+void loadParamsFromFlash() {
+    //临时存储从 Flash 读取的数据
     SystemParams stored_params;
-    
-    // 尝试从EEPROM读取参数
-    if (eeprom.readBlock(0, &stored_params, sizeof(SystemParams))) {
-        // 验证每个参数的范围
-        bool all_valid = true;
-        for (uint8_t i = 0; i < sizeof(param_ranges)/sizeof(ParamRange); i++) {
-            float* param_ptr = ((float*)&stored_params) + i;
-            if (!validateParamRange(i, *param_ptr)) {
-                all_valid = false;
-                break;
-            }
-        }
-        
-        if (all_valid) {
-            // 所有参数都有效，使用EEPROM中的值
-            memcpy(&current_params, &stored_params, sizeof(SystemParams));
-            uart.println("Parameters loaded from EEPROM");
-            return;
+
+    //读取 Flash 数据
+    memcpy(&stored_params, (void*)FLASH_START_ADDR, sizeof(SystemParams));
+
+    bool all_valid = true;
+
+    //遍历每个参数，验证范围
+    for (uint8_t i = 0; i < sizeof(param_ranges)/sizeof(ParamRange); i++) {
+        float* param_ptr = ((float*)&stored_params) + i;
+        if (!validateParamRange(i, *param_ptr)) {
+            Serial.print("Parameter ");
+            Serial.print(param_names[i]);
+            Serial.print(" out of range: ");
+            Serial.println(*param_ptr);
+            all_valid = false;
         }
     }
-    
-    // EEPROM中没有有效数据或数据无效，使用默认值
-    uart.println("Using default parameters");
-    initializeDefaultParams();
-    saveParamsToEEPROM();
+
+    if (all_valid) {
+        //如果 Flash 中所有参数合法，则加载
+        memcpy(&current_params, &stored_params, sizeof(SystemParams));
+        Serial.println("Parameters loaded from Flash successfully");
+    } else {
+        //否则，使用默认值初始化
+        Serial.println("Invalid or uninitialized Flash data detected. Using default parameters.");
+        initializeDefaultParams();
+        //保存到 Flash
+        saveParamsToFlash();
+        Serial.println("Default parameters applied. Saved to Flash.");
+    }
 }
 
-void saveParamsToEEPROM() {
-    eeprom.writeBlock(0, &current_params, sizeof(SystemParams));
-    uart.println("Parameters saved to EEPROM");
-}
-
-// 串口命令处理
+//串口命令处理
 void processSerialCommand() {
     if (serial_index == 0) return;
     
-    serial_buffer[serial_index] = '\0'; // 确保字符串以null结尾
-    
-    // 解析命令
+    serial_buffer[serial_index] = '\0';
     char* token = strtok(serial_buffer, " ");
     
     if (token == NULL) return;
@@ -561,28 +703,27 @@ void processSerialCommand() {
         if (token != NULL) {
             if (strcmp(token, "on") == 0) {
                 report_enabled = true;
-                uart.println("Report enabled");
+                Serial.println("Report enabled");
             } else if (strcmp(token, "off") == 0) {
                 report_enabled = false;
-                uart.println("Report disabled");
+                Serial.println("Report disabled");
             }
         }
     }
     else if (strcmp(token, "get") == 0) {
         token = strtok(NULL, " ");
         if (token != NULL) {
-            // 查找参数名
             for (uint8_t i = 0; i < sizeof(param_names)/sizeof(char*); i++) {
                 if (strcmp(token, param_names[i]) == 0) {
                     float value = *((float*)&current_params + i);
-                    uart.print(param_names[i]);
-                    uart.print(" = ");
-                    uart.println(value, 4);
+                    Serial.print(param_names[i]);
+                    Serial.print(" = ");
+                    Serial.println(value, 4);
                     return;
                 }
             }
-            uart.print("Unknown parameter: ");
-            uart.println(token);
+            Serial.print("Unknown parameter: ");
+            Serial.println(token);
         }
     }
     else if (strcmp(token, "set") == 0) {
@@ -593,62 +734,70 @@ void processSerialCommand() {
             if (token != NULL) {
                 float new_value = atof(token);
                 
-                // 查找参数名
                 for (uint8_t i = 0; i < sizeof(param_names)/sizeof(char*); i++) {
                     if (strcmp(param_name, param_names[i]) == 0) {
                         if (validateParamRange(i, new_value)) {
                             *((float*)&current_params + i) = new_value;
-                            saveParamsToEEPROM();
+                            saveParamsToFlash();
                             
-                            uart.print("Set ");
-                            uart.print(param_names[i]);
-                            uart.print(" to ");
-                            uart.println(new_value, 4);
+                            Serial.print("Set ");
+                            Serial.print(param_names[i]);
+                            Serial.print(" to ");
+                            Serial.println(new_value, 4);
                             
-                            // 重启后生效的提示
-                            uart.println("Note: Some parameters require restart to take effect");
+                            // 更新滤波器参数
+                            if (strcmp(param_name, "IMU_FILTER") == 0) {
+                                accel_x_filter.setCutoffFrequency(current_params.IMU_FILTER, current_params.LOOP_FREQUENCY);
+                                accel_y_filter.setCutoffFrequency(current_params.IMU_FILTER, current_params.LOOP_FREQUENCY);
+                                gyro_z_filter.setCutoffFrequency(2*current_params.IMU_FILTER, current_params.LOOP_FREQUENCY);
+                            }
+                            if (strcmp(param_name, "SERVO_FILTER") == 0) {
+                                servo_filter.setCutoffFrequency(current_params.SERVO_FILTER, current_params.LOOP_FREQUENCY);
+                            }
+                            
+                            Serial.println("Note: Some parameters require restart to take effect");
                         } else {
-                            uart.print("Value out of range! Valid range: ");
-                            uart.print(param_ranges[i].min);
-                            uart.print(" to ");
-                            uart.println(param_ranges[i].max);
+                            Serial.print("Value out of range! Valid range: ");
+                            Serial.print(param_ranges[i].min);
+                            Serial.print(" to ");
+                            Serial.println(param_ranges[i].max);
                         }
                         return;
                     }
                 }
-                uart.print("Unknown parameter: ");
-                uart.println(param_name);
+                Serial.print("Unknown parameter: ");
+                Serial.println(param_name);
             }
         }
     }
     else if (strcmp(token, "help") == 0) {
-        uart.println("Available commands:");
-        uart.println("  report on/off - Enable/disable data reporting");
-        uart.println("  get <param>   - Get parameter value");
-        uart.println("  set <param> <value> - Set parameter value");
-        uart.println("  help          - Show this help");
-        uart.println("  params        - List all parameters");
+        Serial.println("Available commands:");
+        Serial.println("  report on/off - Enable/disable data reporting");
+        Serial.println("  get <param>   - Get parameter value");
+        Serial.println("  set <param> <value> - Set parameter value");
+        Serial.println("  help          - Show this help");
+        Serial.println("  params        - List all parameters");
     }
     else if (strcmp(token, "params") == 0) {
-        uart.println("Available parameters:");
+        Serial.println("Available parameters:");
         for (uint8_t i = 0; i < sizeof(param_names)/sizeof(char*); i++) {
             float value = *((float*)&current_params + i);
-            uart.print("  ");
-            uart.print(param_names[i]);
-            uart.print(" = ");
-            uart.println(value, 4);
+            Serial.print("  ");
+            Serial.print(param_names[i]);
+            Serial.print(" = ");
+            Serial.println(value, 4);
         }
     }
     else {
-        uart.print("Unknown command: ");
-        uart.println(token);
-        uart.println("Type 'help' for available commands");
+        Serial.print("Unknown command: ");
+        Serial.println(token);
+        Serial.println("Type 'help' for available commands");
     }
 }
 
 void processSerialInput() {
-    while (uart.available() > 0) {
-        char c = uart.read();
+    while (Serial.available() > 0) {
+        char c = Serial.read();
         
         if (c == '\r' || c == '\n') {
             if (serial_index > 0) {
@@ -662,31 +811,33 @@ void processSerialInput() {
 }
 
 void setup() {
-    // 初始化UART
-    uart.begin(115200);
+    Serial.begin(115200);
+    delay(100);
     
-    // 初始化EEPROM
-    eeprom.init();
+    // 加载参数
+    Serial.println("Loading parameters...");
+    loadParamsFromFlash();
+
+    // 初始化IMU
+    Serial.println("Initializing IMU...");
+    if (imu.begin() != 0) {
+        Serial.println("ERROR: LSM6DS3 initialization failed!");
+        while(1) {}
+    } else {
+        Serial.println("LSM6DS3 initialized successfully!");
+    }
     
-    // 从EEPROM加载参数
-    loadParamsFromEEPROM();
-    
-    // 初始化MPU6000
-    if (!mpu.init()) {
-        uart.println("ERROR: MPU6000 initialization failed!");
+    // 初始化硬件PWM输出
+    if (!initPWMOutput()) {
+        Serial.println("ERROR: PWM output initialization failed!");
         while(1) {}
     }
     
-    // 初始化PWM输出系统
-    PWMOutput::init();
-    PWMOutput::enable(SERVO_OUT_CHANNEL);
-    PWMOutput::setFrequency(100);
-    
-    // 设置输入引脚和中断
-    pinMode(STEERING_IN_PIN, INPUT);
-    pinMode(GAIN_IN_PIN, INPUT);
-    attachInterrupt(digitalPinToInterrupt(STEERING_IN_PIN), steeringISR, CHANGE);
-    attachInterrupt(digitalPinToInterrupt(GAIN_IN_PIN), gainISR, CHANGE);
+    // 初始化PWM输入捕获
+    if (!initPWMCapture()) {
+        Serial.println("ERROR: PWM capture initialization failed!");
+        // 注意：即使捕获失败，程序仍然可以运行，使用默认值
+    }
     
     // 初始化滤波器
     accel_x_filter.setCutoffFrequency(current_params.IMU_FILTER, current_params.LOOP_FREQUENCY);
@@ -695,17 +846,18 @@ void setup() {
     servo_filter.setCutoffFrequency(current_params.SERVO_FILTER, current_params.LOOP_FREQUENCY);
     
     // 初始化时间戳
-    steering_last_update = millis();
-    gain_last_update = millis();
+    steering_last_capture_time = millis();
+    gain_last_capture_time = millis();
     
-    mpu.delay_ms(100);
+    delay(100);
     
-    uart.println("APM2.8 RC gyro system");
-    uart.print("installation direction: ");
-    uart.print((int)current_params.BOARD_ROTATION);
-    uart.println("degree");
-    uart.println("Serial commands: report on/off, get/set <param>, help");
-    uart.println("Data reporting is OFF by default");
+    Serial.println("nRF52840 RC gyro system");
+    Serial.println("PWM capture: Optimized interrupt (CHANGE trigger)");
+    Serial.print("Installation direction: ");
+    Serial.print((int)current_params.BOARD_ROTATION);
+    Serial.println(" degree");
+    Serial.println("Serial commands: report on/off, get/set <param>, help");
+    Serial.println("Data reporting is OFF by default");
 }
 
 void loop() {
@@ -714,34 +866,38 @@ void loop() {
     // 处理串口输入
     processSerialInput();
     
+    // 检查输入超时
     checkInputTimeout();
     
-    if (mpu.read_sensors()) {
-        float accel_x_raw = mpu.get_accel_x();
-        float accel_y_raw = mpu.get_accel_y();
-        float gyro_z_raw = mpu.get_gyro_z();
-        
-        float accel_x_filt, accel_y_filt, gyro_z_filt;
-        applySensorFilters(accel_x_raw, accel_y_raw, gyro_z_raw, 
-                          accel_x_filt, accel_y_filt, gyro_z_filt);
-        
-        KinematicState state;
-        // 调用时传入旋转角度参数
-        calculateKinematicState(accel_x_filt, accel_y_filt, gyro_z_filt, state, current_params.BOARD_ROTATION);
-        
-        float gain = calculateGain();
-        float correction = calculateCounterSteerByKinematics(state, gain);
-        
-        outputServo(steering_pwm, correction);
-        
-        static uint32_t last_print = 0;
-        if (millis() - last_print > 100) {
-            printKinematicData(state, correction);
-            last_print = millis();
-        }
-    } else {
-        uart.println("ERROR: Failed to read MPU6000 sensor data!");
+    // 读取传感器数据
+    float accel_x_raw = imu.readFloatAccelX();
+    float accel_y_raw = imu.readFloatAccelY();
+    float gyro_z_raw = imu.readFloatGyroZ();
+
+    gyro_z_raw = median_filter(gyro_z_raw);//去毛刺
+    
+    float accel_x_filt, accel_y_filt, gyro_z_filt;
+    applySensorFilters(accel_x_raw, accel_y_raw, gyro_z_raw, 
+                      accel_x_filt, accel_y_filt, gyro_z_filt);
+    
+    KinematicState state;
+    calculateKinematicState(accel_x_filt, accel_y_filt, gyro_z_filt, state, current_params.BOARD_ROTATION);
+    
+    // 获取当前PWM值
+    uint16_t steering_pwm = getSteeringPWM();
+    float gain = calculateGain();
+    float correction = calculateCounterSteerByKinematics(state, gain);
+    
+    // 输出到舵机
+    outputServo(steering_pwm, correction);
+    
+    // 数据报告
+    static uint32_t last_print = 0;
+    if (millis() - last_print > 100) {
+        printKinematicData(state, correction);
+        last_print = millis();
     }
     
+    // 控制循环频率
     controlLoopFrequency();
 }

@@ -1,12 +1,12 @@
 # ArduDrift : RC Drift Car Gyro Stabilization System
 
-An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight controller hardware. This project implements counter-steering control using dual sensor parameters (angular velocity and lateral acceleration) to maintain drift angles and improve vehicle control.
+An Arduino-based gyro stabilization system for RC drift cars using seeed xiao ble sense hardware. This project implements counter-steering control using dual sensor parameters (angular velocity and lateral acceleration) to maintain drift angles and improve vehicle control.
 
 ## Features
 
 - **Dual Sensor Fusion**: Combines gyroscope (angular velocity) and accelerometer (lateral acceleration) data for precise counter-steering control
 - **Hardware PWM Output**: Uses hardware timers for stable 50Hz servo control
-- **Configurable Installation**: Supports 0°, 90°, 180°, and 270° flight controller rotation
+- **Configurable Installation**: Supports flight controller rotation
 - **Real-time Adjustability**: Gain control via remote control channel
 - **Sensor Filtering**: Multiple low-pass filters for smooth signal processing
 - **Serial Command Interface**: Real-time parameter adjustment via serial connection
@@ -15,52 +15,53 @@ An Arduino-based gyro stabilization system for RC drift cars using APM2.8 flight
 
 ## Hardware Requirements
 
-- **Main Controller**: APM2.8 Flight Controller
-- **Sensors**: MPU6000 IMU (built into APM2.8)
+- **Main Controller**: seeed xiao ble sense
+- **Sensors**: Built-in IMU
 - **Test Platform**: 3Racing D5MR Chassis (validated)
 - **Power**: 5V BEC (external) - **Important: Do not use 6V ESC power**
 
-![D5MR with APM2.8](./D5mr%20with%20apm2.8.jpg)
-*3Racing D5MR drift chassis with APM2.8 flight controller*
+![D5MR with xiao](./D5mr%20with%20xiao.jpg)
+*3Racing D5MR drift chassis with xiao ble sense*
 
 ## Wiring Configuration
 
-| Signal Type | APM2.8 Pin | Physical Connection |
+| Signal Type | Xiao ble Pin | Physical Connection |
 |-------------|------------|---------------------|
-| Steering Input | OUTPUT 7 (Pin 2) | Receiver steering channel |
-| Gain Input | OUTPUT 6 (Pin 3) | Receiver auxiliary channel |
-| Servo Output | OUTPUT 1 (Pin 11) | Steering servo signal |
+| Steering Input | Pin D4 | Receiver steering channel |
+| Gain Input | Pin D5 | Receiver auxiliary channel |
+| Servo Output | Pin D1 | Steering servo signal |
 
 ## Power Supply Warning
 
-**CRITICAL**: APM2.8 flight controllers cannot typically handle 6V power from car ESCs. 
+**CRITICAL**: xiao ble cannot typically handle 6V power from car ESCs. 
 
 **Required Setup**:
-1. Remove the power jumper cap from APM2.8
-2. Connect an external 5V BEC to the INPUT power pins
-3. Ensure all components share a common ground
+1. Connect an external 5V BEC to the Vbus and GND pins
+2. Ensure all components share a common ground
 
 ## Installation & Programming
 
-**If you use the release version, you can install the .hex firmware via Ardudrift Tuner**
-
 1. **Software Setup**:
    - Install Arduino IDE
-   - Add APM2.8 board support (if required)
+   - Add xiao ble board support
+
+ Navigate to File > Preferences, and fill "Additional Boards Manager URLs" with the url below: https://files.seeedstudio.com/arduino/package_seeeduino_boards_index.json
+
+ Navigate to Tools > Board > Boards Manager..., type the keyword "seeed nrf52" in the search box, select the latest version of the board you want, and install it. 
 
 2. **Upload Code**:
    - Open the project in Arduino IDE
    - Select appropriate board and port
-   - Upload to APM2.8
+   - Upload to xiao ble sense
 
 3. **Hardware Installation**:
-   - Mount APM2.8 in desired orientation
+   - Mount xiao ble sense in desired orientation
    - Update `BOARD_ROTATION` in code if rotated (default: 90°)
    - Connect all signals as per wiring table
 
 ## Serial Command Interface
 
-The system provides a comprehensive serial command interface for real-time parameter adjustment. Connect to the APM2.8 via USB at 115200 baud.
+The system provides a comprehensive serial command interface for real-time parameter adjustment. Connect to the xiao ble sense via USB at 115200 baud.
 
 ### Available Commands:
 
@@ -97,7 +98,7 @@ report off
 
 | Parameter | Default Value | Valid Range | Description |
 |-----------|---------------|-------------|-------------|
-| `BOARD_ROTATION` | 90 | 0-360° | Flight controller installation angle |
+| `BOARD_ROTATION` | 90 | 0-360° | Controller installation angle |
 | `K_GAIN` | 0.003 | -0.1-0.1 | Overall sensitivity multiplier, use a negative value to reverse servo rotation |
 | `DEFAULT_GAIN` | 200 | 0-500 | Default gain when no input signal |
 
@@ -183,8 +184,8 @@ Current default parameters work well for medium-speed drifting. Parameters are c
 
 ## Troubleshooting
 
-1. **No Servo Movement**: Check OUTPUT 1 connection and 5V BEC power
-2. **No Receiver Input**: Verify OUTPUT 6 & 7 connections and receiver binding
+1. **No Servo Movement**: Check servo connection and 5V BEC power
+2. **No Receiver Input**: Verify receiver connections and receiver binding
 3. **Erratic Behavior**: Ensure stable 5V power supply and proper grounding
 4. **Wrong Direction**: Adjust `BOARD_ROTATION` and 'K_GAIN' parameter
 5. **Serial Connection Issues**: Verify 115200 baud rate and correct COM port

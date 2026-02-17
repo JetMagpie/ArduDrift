@@ -8,14 +8,13 @@ A comprehensive tuning and monitoring application for ardudrift control system.
 - **Serial Communication**: Connect to Arduino devices via serial port
 - **Live Data Monitoring**: Real-time sensor data visualization with multiple plots
 - **S-Curve Visualization**: Preview response curves for gyro and output parameters
-- **EEPROM Management**: Save and load parameters to/from device EEPROM
+- **Flash Management**: Save and load parameters to/from device flash
 - **Manual Command Interface**: Send custom commands directly to the device
-- **Firmware Flashing**: Flash .hex firmware to arduino mega device
 
 ## Supported Parameters
 
 ### System Parameters
-- **BOARD_ROTATION**: Flight controller installation orientation (0-360°)
+- **BOARD_ROTATION**: Controller installation orientation (0-360°)
 - **K_GAIN**: Overall sensitivity multiplier, use a negative value to reverse servo rotation
 - **DEFAULT_GAIN**: Default gain when no input signal
 - **LOOP_FREQUENCY**: Main control loop frequency (50-1000Hz)
@@ -65,8 +64,7 @@ The application can display real-time sensor data including:
 
 1. Connect your Arduino device
 2. Select the correct serial port
-3. Click "Flash Firmware", select the right hex file and flash (only for new device)
-4. Click "Open Port" to establish connection
-5. Use sliders to adjust parameters in real-time
-6. Enable "Report" to start data monitoring
-7. Open "Real-time Charts" for visual data analysis
+3. Click "Open Port" to establish connection
+4. Use sliders to adjust parameters in real-time
+5. Enable "Report" to start data monitoring
+6. Open "Real-time Charts" for visual data analysis

@@ -49,6 +49,10 @@ An Arduino-based gyro stabilization system for RC drift cars using seeed xiao bl
 
  Navigate to Tools > Board > Boards Manager..., type the keyword "seeed nrf52" in the search box, select the latest version of the board you want, and install it. 
 
+ Download Seeed_Arduino_LSM6DS3 Library as a zip file: https://github.com/Seeed-Studio/Seeed_Arduino_LSM6DS3
+
+ Open Arduino IDE, navigate to Sketch > Include Library > Add .ZIP Library... and open the downloaded zip file.
+
 2. **Upload Code**:
    - Open the project in Arduino IDE
    - Select appropriate board and port
